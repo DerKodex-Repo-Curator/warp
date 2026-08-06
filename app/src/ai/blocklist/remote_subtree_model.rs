@@ -387,11 +387,18 @@ impl RemoteSubtreeModel {
             | BlocklistAIHistoryEvent::DeletedConversation {
                 conversation_id, ..
             } => {
-                self.entries.remove(conversation_id);
-                for entry in self.entries.values_mut() {
-                    entry
-                        .children
-                        .retain(|_, child| child.conversation_id != *conversation_id);
+                self.unwatch(conversation_id);
+            }
+            // A bulk clear emits no per-conversation remove events, and a cleared conversation
+            // loses its surface, so its local status freezes and the entry would keep polling
+            // forever. Drop the entries; a restore/reopen re-watches via the pill bar's regular
+            // sync triggers.
+            BlocklistAIHistoryEvent::ClearedConversationsForTerminalSurface {
+                cleared_conversation_ids,
+                ..
+            } => {
+                for conversation_id in cleared_conversation_ids {
+                    self.unwatch(conversation_id);
                 }
             }
             BlocklistAIHistoryEvent::StartedNewConversation { .. }
@@ -402,7 +409,6 @@ impl RemoteSubtreeModel {
             | BlocklistAIHistoryEvent::UpdatedStreamingExchange { .. }
             | BlocklistAIHistoryEvent::SetActiveConversation { .. }
             | BlocklistAIHistoryEvent::ClearedActiveConversation { .. }
-            | BlocklistAIHistoryEvent::ClearedConversationsForTerminalSurface { .. }
             | BlocklistAIHistoryEvent::UpdatedTodoList { .. }
             | BlocklistAIHistoryEvent::UpdatedAutoexecuteOverride { .. }
             | BlocklistAIHistoryEvent::SplitConversation { .. }
@@ -417,6 +423,16 @@ impl RemoteSubtreeModel {
             | BlocklistAIHistoryEvent::OrchestrationConfigUpdated { .. }
             | BlocklistAIHistoryEvent::ConversationUsageMetadataUpdated { .. }
             | BlocklistAIHistoryEvent::LocalSharedSessionEstablished { .. } => {}
+        }
+    }
+
+    /// Stops watching a conversation and drops any child references to it.
+    fn unwatch(&mut self, conversation_id: &AIConversationId) {
+        self.entries.remove(conversation_id);
+        for entry in self.entries.values_mut() {
+            entry
+                .children
+                .retain(|_, child| child.conversation_id != *conversation_id);
         }
     }
 }

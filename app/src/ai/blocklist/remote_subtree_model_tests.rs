@@ -110,6 +110,82 @@ fn dormancy_requires_a_final_sweep_after_the_node_terminates() {
 }
 
 #[test]
+fn bulk_surface_clear_unwatches_cleared_conversations() {
+    App::test((), |mut app| async move {
+        initialize_history_persistence_for_tests(&mut app);
+        let history_model = app.add_singleton_model(|_| BlocklistAIHistoryModel::new_for_test());
+        let terminal_view_id = EntityId::new();
+        let cleared_task_id: AmbientAgentTaskId =
+            "550e8400-e29b-41d4-a716-446655440620".parse().unwrap();
+        let surviving_task_id: AmbientAgentTaskId =
+            "550e8400-e29b-41d4-a716-446655440621".parse().unwrap();
+
+        let (cleared_id, surviving_id) = history_model.update(&mut app, |history, ctx| {
+            let cleared =
+                history.start_new_conversation(terminal_view_id, false, false, false, ctx);
+            let surviving =
+                history.start_new_conversation(EntityId::new(), false, false, false, ctx);
+            (cleared, surviving)
+        });
+
+        let model = app.add_singleton_model(RemoteSubtreeModel::new);
+        model.update(&mut app, |me, _| {
+            me.entries.insert(
+                cleared_id,
+                RemoteSubtreeEntry {
+                    task_id: cleared_task_id,
+                    children: HashMap::new(),
+                    fetch_in_flight: false,
+                    final_sweep_done: false,
+                },
+            );
+            // An unrelated watched node referencing the cleared conversation as a child.
+            let children = HashMap::from([(
+                cleared_task_id,
+                RemoteSubtreeChild {
+                    conversation_id: cleared_id,
+                    last_state: None,
+                },
+            )]);
+            me.entries.insert(
+                surviving_id,
+                RemoteSubtreeEntry {
+                    task_id: surviving_task_id,
+                    children,
+                    fetch_in_flight: false,
+                    final_sweep_done: false,
+                },
+            );
+        });
+
+        model.update(&mut app, |me, _| {
+            me.handle_history_event(
+                &BlocklistAIHistoryEvent::ClearedConversationsForTerminalSurface {
+                    terminal_surface_id: terminal_view_id,
+                    active_conversation_id: None,
+                    cleared_conversation_ids: vec![cleared_id],
+                },
+            );
+        });
+
+        model.read(&app, |me, _| {
+            assert!(
+                !me.entries.contains_key(&cleared_id),
+                "cleared conversations must stop being watched"
+            );
+            let surviving = me
+                .entries
+                .get(&surviving_id)
+                .expect("unrelated entry survives the clear");
+            assert!(
+                surviving.children.is_empty(),
+                "child references to cleared conversations must be pruned"
+            );
+        });
+    });
+}
+
+#[test]
 fn register_or_update_child_materializes_placeholder_and_updates_status() {
     App::test((), |mut app| async move {
         initialize_history_persistence_for_tests(&mut app);
