@@ -938,6 +938,9 @@ pub enum CommandExecutionSource {
     /// A command dispatched by the queued-prompts panel. It should execute like a user command but
     /// must not treat the current editor contents as the submitted command.
     QueuedCommand,
+    FactoryDefinitionSetup {
+        block_id: BlockId,
+    },
 
     EnvVarCollection {
         metadata: BlocklistEnvVarMetadata,
@@ -963,6 +966,7 @@ impl CommandExecutionSource {
         matches!(
             self,
             CommandExecutionSource::QueuedCommand
+                | CommandExecutionSource::FactoryDefinitionSetup { .. }
                 | CommandExecutionSource::SharedSession {
                     preserve_input: true,
                     ..

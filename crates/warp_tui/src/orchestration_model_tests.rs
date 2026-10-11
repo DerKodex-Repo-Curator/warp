@@ -487,6 +487,7 @@ fn local_oz_child_session_indexes_run_id_immediately() {
                         model_id: None,
                         task_id,
                         conversation_name: "verify-child".to_string(),
+                        definitions: None,
                     },
                     &team_scope,
                     ctx,

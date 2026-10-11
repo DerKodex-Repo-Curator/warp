@@ -33,6 +33,8 @@ pub enum StartCommandOutcome {
     RejectedExecuting,
     /// The terminal had terminated, so the start intent was ignored.
     IgnoredTerminated,
+    /// The command targeted a block that is no longer active.
+    IgnoredStaleBlock,
 }
 
 impl StartCommandOutcome {

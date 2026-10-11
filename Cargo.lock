@@ -15956,6 +15956,7 @@ dependencies = [
  "tracing",
  "tracing-futures",
  "warp_core",
+ "warp_graphql",
  "warp_multi_agent_api",
  "warp_server_client",
 ]

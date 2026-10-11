@@ -505,6 +505,16 @@ impl<T: EventLoopSender> PtyController<T> {
                 CommandExecutionSource::User | CommandExecutionSource::QueuedCommand => {
                     model.start_command_execution()
                 }
+                CommandExecutionSource::FactoryDefinitionSetup { block_id } => {
+                    if model.active_block_id() != &block_id {
+                        return StartCommandOutcome::IgnoredStaleBlock;
+                    }
+                    let outcome = model.start_command_execution();
+                    if outcome.is_accepted() {
+                        model.block_list_mut().active_block_mut().hide();
+                    }
+                    outcome
+                }
                 CommandExecutionSource::EnvVarCollection { metadata } => {
                     model.start_command_execution_from_env_var_collection(metadata)
                 }

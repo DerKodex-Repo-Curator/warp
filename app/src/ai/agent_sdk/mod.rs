@@ -1179,24 +1179,48 @@ impl AgentDriverRunner {
                 let task_id_str = task_id_str.clone();
                 let ai_client = Arc::clone(&ai_client);
                 async move {
-                    driver::git_credentials::ensure_workload_token_available()?;
+                    driver::git_credentials::ensure_workload_token_available().inspect_err(
+                        |_| {
+                            driver::git_credentials::update_definition_credential(
+                                &task_id_str,
+                                None,
+                            )
+                        },
+                    )?;
 
                     let workload_token = warp_isolation_platform::issue_workload_token(Some(
                         std::time::Duration::from_secs(5 * 60),
                     ))
                     .await
-                    .map_err(|error| TaskGitCredentialsError::Request(error.into()))?
+                    .map_err(|error| {
+                        driver::git_credentials::update_definition_credential(&task_id_str, None);
+                        TaskGitCredentialsError::Request(error.into())
+                    })?
                     .token;
                     let response = ai_client
                         .get_task_git_credentials(
-                            task_id_str,
+                            task_id_str.clone(),
                             workload_token,
                             false,
                             use_factory_repositories,
                         )
-                        .await?;
+                        .await;
+                    driver::git_credentials::update_definition_credential(
+                        &task_id_str,
+                        response
+                            .as_ref()
+                            .ok()
+                            .and_then(|response| response.definition_credential.clone()),
+                    );
+                    let response = response?;
                     driver::git_credentials::credentials_for_bootstrap(response)
                         .map_err(TaskGitCredentialsError::Request)
+                        .inspect_err(|_| {
+                            driver::git_credentials::update_definition_credential(
+                                &task_id_str,
+                                None,
+                            )
+                        })
                 }
             },
             driver::git_credentials::is_retryable,
@@ -1305,6 +1329,7 @@ impl AgentDriverRunner {
         }
 
         driver::git_credentials::configure_git_credentials(&credentials).map_err(|err| {
+            driver::git_credentials::update_definition_credential(&task_id_str, None);
             log::warn!("Failed to write git credentials before skill resolution: {err:#}");
             tracing::warn!(
                 error = ?err,
@@ -1327,6 +1352,7 @@ impl AgentDriverRunner {
         foreground: &ModelSpawner<Self>,
         args: &RunAgentArgs,
         working_dir: &Path,
+        definitions: Option<&crate::ai::factory_definitions::ActivatedDefinitions>,
         setup_events: &SetupClientEventReporter,
     ) -> Result<Option<ResolvedSkill>, AgentDriverError> {
         if !FeatureFlag::OzPlatformSkills.is_enabled() {
@@ -1335,6 +1361,17 @@ impl AgentDriverRunner {
         let Some(skill_spec) = args.skill.clone() else {
             return Ok(None);
         };
+        crate::ai::factory_definitions::check_authored_skill_path(
+            &skill_spec,
+            working_dir,
+            definitions,
+        )
+        .map_err(AgentDriverError::ConfigBuildFailed)?;
+        if let Some(skill) =
+            definitions.and_then(|definitions| definitions.resolve_skill(&skill_spec))
+        {
+            return Ok(Some(skill));
+        }
 
         // In sandboxed mode with a fully-qualified spec, clone the repo first.
         let needs_clone = args.sandboxed && skill_spec.org.is_some() && skill_spec.repo.is_some();
@@ -1375,6 +1412,7 @@ impl AgentDriverRunner {
         args: &RunAgentArgs,
         config: &ExecutionConfiguration,
         working_dir: &Path,
+        definitions: Option<&crate::ai::factory_definitions::ActivatedDefinitions>,
         setup_events: &SetupClientEventReporter,
     ) -> Result<(Option<ResolvedSkill>, Vec<PathBuf>), AgentDriverError> {
         if !config.skills.is_empty() && !FeatureFlag::OzPlatformSkills.is_enabled() {
@@ -1390,9 +1428,15 @@ impl AgentDriverRunner {
                 .map_err(|error: String| AgentDriverError::SkillResolutionFailed(error))?;
             let mut skill_args = args.clone();
             skill_args.skill = Some(spec);
-            let skill = Self::resolve_skill(foreground, &skill_args, working_dir, setup_events)
-                .await?
-                .ok_or(AgentDriverError::InvalidRuntimeState)?;
+            let skill = Self::resolve_skill(
+                foreground,
+                &skill_args,
+                working_dir,
+                definitions,
+                setup_events,
+            )
+            .await?
+            .ok_or(AgentDriverError::InvalidRuntimeState)?;
             resolved.push(skill);
         }
         selected_execution_skills(resolved)
@@ -1420,7 +1464,30 @@ impl AgentDriverRunner {
         }
         .map_err(AgentDriverError::ConfigBuildFailed)?;
 
-        if let Some(task_id_str) = args.task_id.as_ref() {
+        if args.task_id.is_none() {
+            crate::ai::factory_definitions::require_production_root(server_api.as_ref())
+                .await
+                .map_err(AgentDriverError::ConfigBuildFailed)?;
+        }
+        let preparation = if let Some(task_id_str) = args.task_id.as_deref() {
+            Some(
+                crate::ai::factory_definitions::DefinitionPreparation::load(
+                    task_id_str,
+                    args.execution_id.as_deref(),
+                    server_api.as_ref(),
+                )
+                .await
+                .map_err(AgentDriverError::ConfigBuildFailed)?,
+            )
+        } else {
+            None
+        };
+        let is_local_preview = preparation
+            .as_ref()
+            .is_some_and(|preparation| preparation.is_local_preview());
+        if let Some(task_id_str) = args.task_id.as_ref()
+            && !is_local_preview
+        {
             Self::bootstrap_git_credentials_for_task(
                 foreground,
                 task_id_str,
@@ -1439,11 +1506,27 @@ impl AgentDriverRunner {
             attachments,
         }) = execution_data
         {
+            let definitions = preparation
+                .context("Missing execution definition preparation")
+                .map_err(AgentDriverError::ConfigBuildFailed)?
+                .activate(
+                    args.task_id
+                        .as_deref()
+                        .context("Missing execution task ID")
+                        .map_err(AgentDriverError::ConfigBuildFailed)?,
+                    args.execution_id.as_deref(),
+                    config.parent_run_id.as_ref().map(cynic::Id::inner),
+                    &working_dir,
+                    server_api.as_ref(),
+                )
+                .await
+                .map_err(AgentDriverError::ConfigBuildFailed)?;
             let (first_skill, skill_discovery_dirs) = Self::resolve_execution_skills(
                 foreground,
                 &args,
                 &config,
                 &working_dir,
+                definitions.as_ref(),
                 setup_events,
             )
             .await?;
@@ -1462,6 +1545,18 @@ impl AgentDriverRunner {
                 .await?
                 .map_err(AgentDriverError::ConfigBuildFailed)?;
             options.team_scope = agent_driver_team_scope;
+            if let Some(definitions) = definitions {
+                let mut dirs = definitions.skill_dirs.clone();
+                dirs.extend(
+                    options
+                        .workspace
+                        .factory_skill_dirs
+                        .take()
+                        .unwrap_or_default(),
+                );
+                options.workspace.factory_skill_dirs = Some(dirs);
+                options.workspace.factory_definitions = Some(definitions);
+            }
             let task_id = options
                 .task_id
                 .ok_or(AgentDriverError::InvalidRuntimeState)?;
@@ -1491,9 +1586,28 @@ impl AgentDriverRunner {
             }
             return Ok((options, task, conversation_id));
         }
+        let mut definitions = match preparation {
+            Some(preparation) => preparation
+                .activate(
+                    args.task_id.as_deref().expect("prepared task ID"),
+                    None,
+                    None,
+                    &working_dir,
+                    server_api.as_ref(),
+                )
+                .await
+                .map_err(AgentDriverError::ConfigBuildFailed)?,
+            None => None,
+        };
         // Resolve the skill, if we have one
-        let resolved_skill =
-            Self::resolve_skill(foreground, &args, &working_dir, setup_events).await?;
+        let resolved_skill = Self::resolve_skill(
+            foreground,
+            &args,
+            &working_dir,
+            definitions.as_ref(),
+            setup_events,
+        )
+        .await?;
 
         // Extract variables we want to use later before moving args into the closure
         let task_id_str = args.task_id.clone();
@@ -1578,21 +1692,53 @@ impl AgentDriverRunner {
         // Handle secrets/attachments fetch (existing task) or task creation (new run).
         // The existing-task branch also surfaces the task's `conversation_id` (if any) so
         // the caller can wire up resume without a separate `--conversation` arg.
+        let is_new_task = task_id_str.is_none();
         let (task_conversation_id, additional_source_repos) = if let Some(task_id_str) = task_id_str
         {
             driver_options.team_scope = agent_driver_team_scope;
-            setup_events
-                .record_result(
-                    SetupStep::TaskDataFetch,
-                    Self::fetch_secrets_and_attachments(
-                        foreground,
-                        server_api,
-                        task_id_str,
-                        &mut driver_options,
-                        &mut task,
-                    ),
-                )
-                .await?
+            if is_local_preview {
+                let task_id = driver_options
+                    .task_id
+                    .ok_or(AgentDriverError::InvalidRuntimeState)?;
+                Self::set_ambient_agent_task_id(foreground, Some(task_id)).await?;
+                let metadata = server_api
+                    .get_ambient_agent_task(&task_id)
+                    .await
+                    .map_err(AgentDriverError::TaskMetadataFetchFailed)?;
+                driver_options.parent_run_id = metadata.parent_run_id;
+                if let Some(scope) = metadata.scope.as_ref() {
+                    driver_options.team_scope = Some(HeadlessTeamScope::from_task_scope(scope));
+                }
+                if let Some(config) = metadata.agent_config_snapshot {
+                    driver_options.experimental = config.experimental;
+                    if let Some(harness) = config.harness {
+                        task.harness = reconcile_task_harness(
+                            &task_id_str,
+                            &mut driver_options.selected_harness,
+                            harness.harness_type,
+                            driver_options.harness_transport,
+                        )?;
+                        if driver_options.third_party_harness_model_config.is_none() {
+                            driver_options.third_party_harness_model_config =
+                                harness.model_config();
+                        }
+                    }
+                }
+                (metadata.conversation_id, Vec::new())
+            } else {
+                setup_events
+                    .record_result(
+                        SetupStep::TaskDataFetch,
+                        Self::fetch_secrets_and_attachments(
+                            foreground,
+                            server_api,
+                            task_id_str,
+                            &mut driver_options,
+                            &mut task,
+                        ),
+                    )
+                    .await?
+            }
         } else {
             // Extract the prompt text that we'll pass up to the server when we create the task.
             let prompt_for_task_creation = match &prompt {
@@ -1617,6 +1763,27 @@ impl AgentDriverRunner {
             .await?;
             (None, Vec::new())
         };
+        if definitions.is_none()
+            && let Some(task_id) = driver_options.task_id
+            && is_new_task
+        {
+            definitions = crate::ai::factory_definitions::prepare(
+                &task_id.to_string(),
+                None,
+                driver_options.parent_run_id.as_deref(),
+                &driver_options.working_dir,
+                server_api.as_ref(),
+            )
+            .await
+            .map_err(AgentDriverError::ConfigBuildFailed)?;
+        }
+        if let Some(definitions) = definitions.as_ref()
+            && definitions.metadata.local
+        {
+            driver_options.workspace.factory_skill_dirs = Some(definitions.skill_dirs.clone());
+            driver_options.workspace.factory_definitions = Some(definitions.clone());
+            return Ok((driver_options, task, task_conversation_id));
+        }
         // Resolve environment and cloud providers.
         let environment = setup_events
             .record_result(
@@ -1631,6 +1798,10 @@ impl AgentDriverRunner {
             remove_repository_origins,
         )?;
 
+        if let Some(definitions) = definitions {
+            driver_options.workspace.factory_skill_dirs = Some(definitions.skill_dirs.clone());
+            driver_options.workspace.factory_definitions = Some(definitions);
+        }
         Ok((driver_options, task, task_conversation_id))
     }
 
@@ -1657,25 +1828,16 @@ impl AgentDriverRunner {
             Some(config)
         };
 
-        let task_id = match server_api
+        let task_id = server_api
             .create_agent_task(prompt, environment, None, task_config, request_team_scope)
             .await
             .context("Failed to create task")
-        {
-            Ok(id) => {
-                log::info!("Created task: {id}");
-                Some(id)
-            }
-            Err(e) => {
-                report_error!(e);
-                // Continue without a task_id rather than failing entirely
-                None
-            }
-        };
+            .map_err(AgentDriverError::ConfigBuildFailed)?;
+        log::info!("Created task: {task_id}");
 
         // Set the task ID on the ServerApi so it's sent with all subsequent requests.
-        Self::set_ambient_agent_task_id(foreground, task_id).await?;
-        driver_options.task_id = task_id;
+        Self::set_ambient_agent_task_id(foreground, Some(task_id)).await?;
+        driver_options.task_id = Some(task_id);
 
         Ok(())
     }

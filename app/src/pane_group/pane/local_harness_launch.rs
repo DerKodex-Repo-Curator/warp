@@ -186,18 +186,36 @@ pub(super) async fn prepare_local_harness_child_launch(
         return Err(message.to_string());
     }
     validate_local_harness_shell(shell_type)?;
+    let working_dir = startup_directory
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "Could not resolve the local child working directory".to_owned())?;
+    let task_id = ai_client
+        .create_agent_task(
+            prompt.clone(),
+            None,
+            parent_run_id.clone(),
+            local_child_task_config(harness, agent_name),
+            team_scope,
+        )
+        .await
+        .map_err(|error| format!("Failed to create local child task: {error}"))?;
+    let definitions = crate::ai::factory_definitions::prepare(
+        &task_id.to_string(),
+        None,
+        parent_run_id.as_deref(),
+        &working_dir,
+        ai_client.as_ref(),
+    )
+    .await
+    .map_err(|error| format!("Failed to prepare local child definitions: {error:#}"))?;
+    let skill_dirs = definitions
+        .as_ref()
+        .map(|definitions| definitions.skill_dirs.clone())
+        .unwrap_or_else(ai::skills::parse_skills_dirs_env);
     let command = match harness {
         Harness::Oz => unreachable!("normalize_local_child_harness filters out Oz"),
         Harness::Unknown => unreachable!("normalize_local_child_harness filters out Unknown"),
         Harness::Claude => {
-            let working_dir = startup_directory
-                .or_else(|| std::env::current_dir().ok())
-                .ok_or_else(|| {
-                    format!(
-                        "Could not resolve a working directory for the local {} child.",
-                        harness.display_name()
-                    )
-                })?;
             let HarnessKind::ThirdParty(third_party_harness) =
                 harness_kind(harness, HarnessTransport::Pty)
                     .map_err(|error: AgentDriverError| error.to_string())?
@@ -215,7 +233,7 @@ pub(super) async fn prepare_local_harness_child_launch(
                 &working_dir,
                 &working_dir,
                 &HashMap::new(),
-                &ai::skills::parse_skills_dirs_env(),
+                &skill_dirs,
                 false,
             )
             .map_err(|error| error.to_string())?;
@@ -250,23 +268,10 @@ pub(super) async fn prepare_local_harness_child_launch(
         Harness::Gemini => unreachable!("normalize_local_child_harness filters out Gemini"),
     };
 
-    let task_id = ai_client
-        .create_agent_task(
-            prompt.clone(),
-            None,
-            parent_run_id.clone(),
-            local_child_task_config(harness, agent_name),
-            team_scope,
-        )
-        .await
-        .map_err(|error| {
-            format!(
-                "Failed to create local {} child task: {error}",
-                harness.display_name()
-            )
-        })?;
-
     let mut env_vars = task_env_vars(Some(&task_id), parent_run_id.as_deref(), harness);
+    if let Some(definitions) = definitions {
+        env_vars.extend(definitions.env_vars());
+    }
     if harness == Harness::Claude {
         // Local Claude child panes are launched directly in hidden terminals,
         // not through AgentDriver's ClaudeHarnessRunner. Let the Claude plugin

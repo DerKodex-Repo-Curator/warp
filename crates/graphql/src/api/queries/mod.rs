@@ -1,6 +1,7 @@
 pub mod api_keys;
 pub mod codebase_context_config;
 pub mod execution_config;
+pub mod factory_definition_setup;
 pub mod free_available_models;
 pub mod get_ai_conversation_format;
 pub mod get_ai_credit_availability;
@@ -29,6 +30,7 @@ pub mod list_ai_conversations;
 pub mod list_harness_auth_secrets;
 pub mod list_managed_secrets;
 pub mod list_warp_dev_images;
+pub mod local_task_root_scope;
 pub mod managed_secret_config;
 pub mod rerank_fragments;
 pub mod setup_failure_debug_authorization;

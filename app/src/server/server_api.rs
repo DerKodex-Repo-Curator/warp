@@ -597,6 +597,27 @@ impl ServerApi {
         )
     }
 
+    fn send_definition_setup_graphql_request<
+        'a,
+        QF,
+        O: warp_graphql::client::Operation<QF> + Send + 'a,
+    >(
+        &'a self,
+        operation: O,
+        timeout: Option<Duration>,
+        team_uid: Option<String>,
+    ) -> BoxFuture<'a, Result<QF>>
+    where
+        QF: 'a,
+    {
+        warp_server_client::graphql_helpers::send_definition_setup_request(
+            &self.base_client,
+            operation,
+            timeout,
+            team_uid,
+        )
+    }
+
     fn send_graphql_request_for_team<'a, QF, O: warp_graphql::client::Operation<QF> + Send + 'a>(
         &'a self,
         operation: O,

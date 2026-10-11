@@ -46,6 +46,9 @@ fn resolve_from_skill_dirs_by_directory_scan(
 
     for skill_dir in skill_dirs {
         let path = skill_dir.join(&spec.skill_identifier).join(SKILL_FILE_NAME);
+        if crate::ai::factory_definitions::is_definition_path(&path) {
+            continue;
+        }
 
         if path.exists() {
             let parsed = parse_skill(&path).map_err(|err| ResolveSkillError::ParseFailed {
@@ -438,6 +441,9 @@ fn resolve_from_root_path_by_directory_scan(
             .join(&provider.skills_path)
             .join(&spec.skill_identifier)
             .join(SKILL_FILE_NAME);
+        if crate::ai::factory_definitions::is_definition_path(&path) {
+            continue;
+        }
 
         if path.exists() {
             let parsed = parse_skill(&path).map_err(|err| ResolveSkillError::ParseFailed {
@@ -469,7 +475,7 @@ fn parsed_skill_from_manager_or_disk(
     })
 }
 
-fn to_resolved_skill(skill_path: PathBuf, parsed: ParsedSkill) -> ResolvedSkill {
+pub(crate) fn to_resolved_skill(skill_path: PathBuf, parsed: ParsedSkill) -> ResolvedSkill {
     let instructions = instructions_body(&parsed);
     ResolvedSkill {
         name: parsed.name.clone(),

@@ -732,8 +732,94 @@ impl ResponseStream {
         ctx: &mut ModelContext<Self>,
     ) {
         let server_api = ServerApiProvider::as_ref(ctx).get();
+        #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+        let foreground = ctx.spawner();
         let _ = ctx.spawn(
             async move {
+                #[cfg(all(not(target_family = "wasm"), feature = "local_fs"))]
+                let params = {
+                    let mut params = params;
+                    crate::ai::factory_definitions::remove_definition_skill_context(
+                        &mut params.input,
+                    );
+                    if let (Some((session, shell_executor)), Some(task_id)) = (
+                        &params.factory_definition_session,
+                        params.ambient_agent_task_id,
+                    ) {
+                        let prepared = async {
+                            let cwd = params
+                                .session_context
+                                .current_working_directory()
+                                .as_deref()
+                                .map(std::path::Path::new);
+                            session
+                                .prepare(&task_id.to_string(), cwd, server_api.as_ref())
+                                .await
+                        }
+                        .await;
+                        match prepared {
+                            Ok(Some(definitions)) => {
+                                if session.environment_pending(&task_id.to_string()).await {
+                                    let environment = definitions.env_vars();
+                                    let deadline = definitions.setup_deadline;
+                                    let shell_executor = shell_executor.clone();
+                                    let applied = async {
+                                        foreground
+                                            .spawn(move |_, ctx| {
+                                                shell_executor.update(ctx, |executor, ctx| {
+                                                    executor.prepare_factory_environment(
+                                                        environment,
+                                                        deadline,
+                                                        ctx,
+                                                    )
+                                                })
+                                            })
+                                            .await??
+                                            .await
+                                    }
+                                    .await;
+                                    if let Err(error) = applied {
+                                        let stream: api::ResponseStream =
+                                            Box::pin(futures::stream::once(async move {
+                                                Err(Arc::new(AIApiError::Other(error)))
+                                            }));
+                                        return Ok(stream);
+                                    }
+                                    session.environment_applied(&task_id.to_string()).await;
+                                }
+                                definitions.add_skill_context(&mut params.input);
+                                let skills = definitions.skills.clone();
+                                if let Err(error) = foreground
+                                    .spawn(move |_, ctx| {
+                                        crate::ai::skills::SkillManager::handle(ctx).update(
+                                            ctx,
+                                            |manager, _| {
+                                                manager.cache_definition_skills(skills);
+                                            },
+                                        );
+                                    })
+                                    .await
+                                {
+                                    let stream: api::ResponseStream =
+                                        Box::pin(futures::stream::once(async move {
+                                            Err(Arc::new(AIApiError::Other(error.into())))
+                                        }));
+                                    return Ok(stream);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                let stream: api::ResponseStream =
+                                    Box::pin(futures::stream::once(async move {
+                                        Err(Arc::new(AIApiError::Other(error)))
+                                    }));
+                                return Ok(stream);
+                            }
+                        }
+                        params.factory_definition_setup_ready = true;
+                    }
+                    params
+                };
                 generate_multi_agent_output(server_api, params, team_scope, cancellation_rx).await
             },
             move |me, stream, ctx| {

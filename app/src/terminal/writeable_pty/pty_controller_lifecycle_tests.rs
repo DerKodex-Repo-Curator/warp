@@ -100,6 +100,76 @@ fn rejected_and_coalesced_starts_do_not_mutate_controller_or_write_bytes() {
 }
 
 #[test]
+fn factory_branch_setup_targets_the_waited_block_without_agent_history() {
+    App::test((), |mut app| async move {
+        let model = terminal_model();
+        let block_id = model.lock().active_block_id().clone();
+        let (model_events_tx, model_events_rx) = async_channel::unbounded();
+        let (_executor_command_tx, executor_command_rx) = async_channel::unbounded();
+        let sessions = app.add_model(|_| Sessions::new_for_test());
+        let model_events =
+            app.add_model(|ctx| ModelEventDispatcher::new(model_events_rx, sessions.clone(), ctx));
+        let line_editor_status =
+            app.add_model(|ctx| LineEditorStatus::new(model_events.clone(), sessions.clone(), ctx));
+        let sender = TestEventLoopSender::default();
+        let controller = app.add_model(|ctx| {
+            PtyController::new(
+                sender.clone(),
+                model_events,
+                line_editor_status,
+                sessions,
+                executor_command_rx,
+                model.clone(),
+                ctx,
+            )
+        });
+        let rejected = controller.update(&mut app, |controller, ctx| {
+            controller.write_command(
+                "export WARP_FACTORY_BRANCH='preview'",
+                ShellType::Bash,
+                CommandExecutionSource::FactoryDefinitionSetup {
+                    block_id: crate::terminal::model::BlockId::new(),
+                },
+                ctx,
+            )
+        });
+        assert_eq!(rejected, StartCommandOutcome::IgnoredStaleBlock);
+        assert!(sender.messages.lock().is_empty());
+        controller.read(&app, |controller, _| {
+            assert!(controller.pending_writes.is_empty())
+        });
+        assert!(!model.lock().block_list().active_block().is_hidden());
+
+        let source = CommandExecutionSource::FactoryDefinitionSetup {
+            block_id: block_id.clone(),
+        };
+        assert!(!source.is_ai_command());
+        assert!(source.should_preserve_input());
+        let accepted = controller.update(&mut app, |controller, ctx| {
+            controller.write_command(
+                "export WARP_FACTORY_BRANCH='preview'",
+                ShellType::Bash,
+                source,
+                ctx,
+            )
+        });
+        assert_eq!(accepted, StartCommandOutcome::Accepted);
+        {
+            let model = model.lock();
+            let block = model.block_list().block_with_id(&block_id).unwrap();
+            assert!(block.is_hidden());
+            assert!(block.requested_command_action_id().is_none());
+        }
+        controller.read(&app, |controller, _| {
+            assert!(matches!(controller.pending_writes.front(),
+                Some(PtyWrite::Command { command, in_band_command_id: None, .. })
+                    if command == "export WARP_FACTORY_BRANCH='preview'"));
+        });
+        drop(model_events_tx);
+    });
+}
+
+#[test]
 fn native_shell_completions_queues_the_generator_command_for_the_active_sessions_shell() {
     App::test((), |mut app| async move {
         let model = terminal_model();

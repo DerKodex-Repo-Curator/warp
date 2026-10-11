@@ -20,5 +20,6 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-futures.workspace = true
 warp_core.workspace = true
+warp_graphql.workspace = true
 warp_multi_agent_api.workspace = true
 warp_server_client.workspace = true

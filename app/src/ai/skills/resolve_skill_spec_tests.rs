@@ -43,6 +43,32 @@ fn resolve_from_skill_dirs_by_directory_scan_resolves_home_skill_dir() -> Result
 }
 
 #[test]
+#[cfg(unix)]
+fn factory_branch_cold_name_resolution_ignores_downloaded_skill_aliases() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let definitions = temp
+        .path()
+        .join(".warp/factory-definitions/preview/sha/setup/skills");
+    fs::create_dir_all(definitions.join("example"))?;
+    fs::write(definitions.join("example/SKILL.md"), [0xff, 0xfe])?;
+    fs::create_dir(temp.path().join(".agents"))?;
+    std::os::unix::fs::symlink(&definitions, temp.path().join(".agents/skills"))?;
+    let spec = SkillSpec::without_repo("example".to_owned());
+
+    assert!(resolve_from_root_path_by_directory_scan(&spec, temp.path())?.is_none());
+    assert!(
+        resolve_from_skill_dirs_by_directory_scan(&spec, [temp.path().join(".agents/skills")],)?
+            .is_none()
+    );
+    let authored = SkillSpec::without_repo(".agents/skills/example/SKILL.md".to_owned());
+    assert!(
+        crate::ai::factory_definitions::check_authored_skill_path(&authored, temp.path(), None,)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn resolve_from_root_path_by_directory_scan_respects_directory_precedence() -> Result<()> {
     let temp_dir = tempfile::TempDir::new().context("Failed to create temp dir")?;
     let root = temp_dir.path();

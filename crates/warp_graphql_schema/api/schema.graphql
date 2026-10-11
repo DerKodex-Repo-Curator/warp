@@ -3421,6 +3421,7 @@ type RootQuery {
   Returns all images with the 'dev-' prefix from the warpdotdev organization.
   """
   listWarpDevImages: ListWarpDevImagesResult!
+  localTaskRootScope: LocalTaskRootScope!
   managedSecrets(input: ManagedSecretsInput!, requestContext: RequestContext!): ManagedSecretsResult!
   pricingInfo(requestContext: RequestContext!): PricingInfoResult!
   rerankFragments(input: RerankFragmentsInput!, requestContext: RequestContext!): RerankFragmentsResult!
@@ -3873,6 +3874,7 @@ type Task {
   Configuration for the active cloud execution. Requires the execution's workload token.
   """
   executionConfig(executionId: ID!, supportsDeferredRepositories: Boolean = false): ExecutionConfiguration!
+  factoryDefinitionSetup(input: FactoryDefinitionSetupInput!): FactoryDefinitionSetup
 
   """The ID of the task."""
   taskId: ID!
@@ -3941,6 +3943,7 @@ input TaskGitCredentialsInput {
 type TaskGitCredentialsOutput implements Response {
   """The credentials that were freshly issued this cycle, one per host."""
   credentials: [TaskGitCredential!]!
+  definitionCredential: TaskGitCredential
 
   """
   Hosts whose credential could not be issued this cycle because of a
@@ -3970,6 +3973,37 @@ type TaskOutput implements Response {
 }
 
 union TaskResult = TaskOutput | UserFacingError
+
+enum LocalTaskRootScope {
+  PRODUCTION
+  PREVIEW
+  UNAVAILABLE
+}
+
+enum FactoryDefinitionSetupPhase {
+  METADATA
+  MATERIALIZE
+  ACTIVATE
+}
+
+input FactoryDefinitionSetupInput {
+  phase: FactoryDefinitionSetupPhase!
+  executionId: ID
+  branchId: ID
+  sourceFingerprint: String
+  sourceSha: String
+}
+
+type FactoryDefinitionSetup {
+  factoryId: ID!
+  branchId: ID!
+  branch: String!
+  sourceFingerprint: String!
+  sourceSha: String!
+  repositoryUrl: String!
+  skillDirs: [String!]!
+  local: Boolean!
+}
 
 type TaskSecretEntry {
   name: String!

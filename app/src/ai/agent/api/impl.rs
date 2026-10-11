@@ -152,6 +152,7 @@ pub async fn generate_multi_agent_output(
         server_api.as_ref(),
         &request,
         team_scope.team_uid().map(|uid| uid.uid()),
+        params.factory_definition_setup_ready,
     )
     .await;
     match response_stream {

@@ -156,6 +156,27 @@ impl TuiSessions {
         startup_directory: Option<PathBuf>,
         ctx: &mut AppContext,
     ) -> (TuiSessionId, ViewHandle<TuiTerminalSessionView>) {
+        Self::create_local_terminal_session_with_env(
+            sessions,
+            window_id,
+            focus,
+            handles_first_run_onboarding,
+            startup_directory,
+            HashMap::new(),
+            ctx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_local_terminal_session_with_env(
+        sessions: &ModelHandle<Self>,
+        window_id: WindowId,
+        focus: bool,
+        handles_first_run_onboarding: bool,
+        startup_directory: Option<PathBuf>,
+        env_vars: HashMap<OsString, OsString>,
+        ctx: &mut AppContext,
+    ) -> (TuiSessionId, ViewHandle<TuiTerminalSessionView>) {
         let (
             exit_summary,
             keyboard_enhancement_supported,
@@ -181,9 +202,11 @@ impl TuiSessions {
         // TUI does not render a separate banner surface.
         let banner = ctx.add_model(|_| BannerState::default());
         let model_event_sender = PersistenceWriter::as_ref(ctx).sender();
+        let mut inherited_env = HashMap::<OsString, OsString>::from_iter(std::env::vars_os());
+        inherited_env.extend(env_vars);
         let manager = LocalTtyTerminalManager::<TuiTerminalSessionView>::create_tui_model(
             startup_directory,
-            HashMap::<OsString, OsString>::from_iter(std::env::vars_os()),
+            inherited_env,
             IsSharedSessionCreator::No,
             None,
             banner.clone(),
@@ -432,6 +455,7 @@ impl TuiSessions {
                 working_directory,
                 task_id,
                 conversation_name,
+                definitions,
             } => {
                 let window_id = sessions
                     .as_ref(ctx)
@@ -451,12 +475,16 @@ impl TuiSessions {
                     });
                     return;
                 }
-                let (session_id, session_view) = Self::create_local_terminal_session(
+                let (session_id, session_view) = Self::create_local_terminal_session_with_env(
                     &sessions,
                     window_id,
                     false,
                     false,
                     working_directory.clone(),
+                    definitions
+                        .as_ref()
+                        .map(|definitions| definitions.env_vars())
+                        .unwrap_or_default(),
                     ctx,
                 );
                 orchestration_for_events.update(ctx, |orchestration, ctx| {
@@ -469,6 +497,7 @@ impl TuiSessions {
                             model_id: model_id.clone(),
                             task_id: *task_id,
                             conversation_name: conversation_name.clone(),
+                            definitions: definitions.as_deref().cloned(),
                         },
                         &team_context,
                         ctx,

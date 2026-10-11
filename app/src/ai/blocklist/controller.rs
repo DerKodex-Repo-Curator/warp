@@ -356,6 +356,8 @@ pub struct BlocklistAIController {
     /// conversation, because the ambient agent task driver owns the entire Warp window working on a task, and any
     /// sessions within it. In the future, one task may span several sessions with background processes.
     ambient_agent_task_id: Option<AmbientAgentTaskId>,
+    #[cfg(not(target_family = "wasm"))]
+    factory_definition_session: crate::ai::factory_definitions::DefinitionSession,
 
     /// Per-session directory for downloading file attachments.
     /// Set by the agent driver based on the workspace directory (e.g. `{working_dir}/.warp/attachments`).
@@ -722,6 +724,8 @@ impl BlocklistAIController {
             native_prompt_conversation_id: None,
             external_harness_prompt_sink: None,
             ambient_agent_task_id: None,
+            #[cfg(not(target_family = "wasm"))]
+            factory_definition_session: Default::default(),
             attachments_download_dir: None,
             pending_auto_resume_handles: HashMap::new(),
             pending_local_claude_wakes: HashMap::new(),
@@ -2910,6 +2914,14 @@ impl BlocklistAIController {
         self.ambient_agent_task_id
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub fn set_factory_definition_session(
+        &mut self,
+        session: crate::ai::factory_definitions::DefinitionSession,
+    ) {
+        self.factory_definition_session = session;
+    }
+
     /// Set the per-session directory for downloading file attachments.
     pub fn set_attachments_download_dir(&mut self, dir: std::path::PathBuf) {
         self.attachments_download_dir = Some(dir);
@@ -2969,6 +2981,7 @@ impl BlocklistAIController {
             parent_agent_id,
             agent_name,
             use_warp_credits_instead_of_chatgpt,
+            ambient_agent_task_id,
         ) = {
             let Some(conversation) = history_model
                 .as_ref(ctx)
@@ -2992,6 +3005,7 @@ impl BlocklistAIController {
                 conversation.parent_agent_id().map(str::to_string),
                 conversation.agent_name().map(str::to_string),
                 conversation.use_warp_credits_instead_of_chatgpt(),
+                conversation.task_id().or(self.ambient_agent_task_id),
             )
         };
 
@@ -3045,7 +3059,7 @@ impl BlocklistAIController {
             tasks: active_tasks,
             server_conversation_token: conversation_server_token,
             forked_from_conversation_token: conversation_forked_from_token,
-            ambient_agent_task_id: self.ambient_agent_task_id,
+            ambient_agent_task_id,
             existing_suggestions: history_model
                 .as_ref(ctx)
                 .existing_suggestions_for_conversation(conversation_id)
@@ -3088,6 +3102,13 @@ impl BlocklistAIController {
         );
         request_params.parent_agent_id = parent_agent_id;
         request_params.agent_name = agent_name;
+        #[cfg(not(target_family = "wasm"))]
+        {
+            request_params.factory_definition_session = Some((
+                self.factory_definition_session.clone(),
+                self.action_model.as_ref(ctx).shell_command_executor(ctx),
+            ));
+        }
 
         let server_conversation_token_for_identifiers =
             conversation_data.server_conversation_token.clone();

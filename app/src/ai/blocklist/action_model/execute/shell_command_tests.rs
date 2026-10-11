@@ -31,6 +31,112 @@ use crate::terminal::model_events::{ModelEvent, ModelEventDispatcher};
 use crate::test_util::terminal::initialize_app_for_terminal_view;
 
 #[test]
+fn factory_branch_restored_shell_setup_waits_for_the_dispatched_block() {
+    use std::collections::HashMap;
+
+    use crate::terminal::model::session::{SessionId, SessionInfo};
+    use crate::terminal::shell::ShellType;
+
+    App::test((), |mut app| async move {
+        let session_id = SessionId::from(42);
+        let mut sessions = Sessions::new_for_test();
+        sessions.register_session_for_test(
+            SessionInfo::new_for_test()
+                .with_id(session_id)
+                .with_shell_type(ShellType::Bash),
+        );
+        let sessions = app.add_model(|_| sessions);
+        let (_tx, rx) = unbounded();
+        let dispatcher = app.add_model(|ctx| {
+            let mut dispatcher = ModelEventDispatcher::new(rx, sessions.clone(), ctx);
+            dispatcher.set_active_session_id(session_id);
+            dispatcher
+        });
+        let active_session =
+            app.add_model(|ctx| ActiveSession::new(sessions, dispatcher.clone(), ctx));
+        let model = Arc::new(FairMutex::new(TerminalModel::mock(None, None)));
+        let block_id = model.lock().active_block_id().clone();
+        let executor = app.add_model(|ctx| {
+            ShellCommandExecutor::new(
+                active_session,
+                model.clone(),
+                &dispatcher,
+                EntityId::new(),
+                ctx,
+            )
+        });
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let observed = events.clone();
+        app.update(|ctx| {
+            ctx.subscribe_to_model(&executor, move |_, event: &ShellCommandExecutorEvent, _| {
+                observed.borrow_mut().push(event.clone());
+            });
+        });
+        let environment = HashMap::from([
+            ("WARP_FACTORY_BRANCH".into(), "quote'; printf wrong".into()),
+            (
+                "WARP_FACTORY_CONFIG_SHA".into(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ),
+        ]);
+        let completion = executor.update(&mut app, |executor, ctx| {
+            executor
+                .prepare_factory_environment(
+                    environment,
+                    instant::Instant::now() + Duration::from_secs(30),
+                    ctx,
+                )
+                .unwrap()
+        });
+        let event = events.borrow()[0].clone();
+        let ShellCommandExecutorEvent::PrepareFactoryEnvironment {
+            block_id: target,
+            command,
+        } = event
+        else {
+            panic!("setup must not emit a history-dependent agent command");
+        };
+        assert_eq!(target, block_id);
+        #[cfg(unix)]
+        {
+            let output = command::blocking::Command::new("bash")
+                .args([
+                    "-c",
+                    &format!("{command}; printf '%s' \"$WARP_FACTORY_BRANCH\""),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                "quote'; printf wrong"
+            );
+        }
+        {
+            let mut model = model.lock();
+            assert!(model.start_command_execution().is_accepted());
+            model.block_list_mut().active_block_mut().hide();
+            model.simulate_cmd(command.as_str());
+            model.finish_block();
+        }
+        dispatcher.update(&mut app, |_, ctx| {
+            ctx.emit(ModelEvent::BlockMetadataReceived(
+                BlockMetadataReceivedEvent {
+                    block_metadata: BlockMetadata::new(Some(session_id), None),
+                    block_index: BlockIndex::zero(),
+                    is_after_in_band_command: false,
+                    is_done_bootstrapping: true,
+                },
+            ));
+        });
+        assert!(completion.await.is_ok());
+        executor.read(&app, |executor, _| {
+            assert!(executor.block_finished_senders.is_empty())
+        });
+    });
+}
+
+#[test]
 fn polling_snapshot_exposes_continuation_prompt_and_cursor() {
     App::test((), |mut app| async move {
         let sessions = app.add_model(|_| Sessions::new_for_test());

@@ -9,6 +9,70 @@ use warpui_core::r#async::BoxFuture;
 
 use crate::auth::AuthEvent;
 use crate::base_client::{BaseClient, TEAM_UID_HEADER};
+pub fn send_definition_setup_request<'a, QF: 'a, O>(
+    base_client: &'a BaseClient,
+    operation: O,
+    timeout: Option<Duration>,
+    team_uid: Option<String>,
+) -> BoxFuture<'a, Result<QF>>
+where
+    O: Operation<QF> + Send + 'a,
+{
+    Box::pin(async move {
+        let mut options = base_client.graphql_request_options(timeout).await?;
+        if cfg!(not(target_family = "wasm")) {
+            options.headers.insert(
+                warp_graphql::queries::factory_definition_setup::CAPABILITY_HEADER.to_owned(),
+                "1".to_owned(),
+            );
+        }
+        if let Some(team_uid) = team_uid {
+            options.headers.insert(TEAM_UID_HEADER.to_owned(), team_uid);
+        }
+        send_strict_graphql_request_with_options(base_client, operation, options).await
+    })
+}
+
+pub fn send_strict_graphql_request<'a, QF: 'a, O>(
+    base_client: &'a BaseClient,
+    operation: O,
+    timeout: Option<Duration>,
+) -> BoxFuture<'a, Result<QF>>
+where
+    O: Operation<QF> + Send + 'a,
+{
+    Box::pin(async move {
+        let options = base_client.graphql_request_options(timeout).await?;
+        send_strict_graphql_request_with_options(base_client, operation, options).await
+    })
+}
+
+async fn send_strict_graphql_request_with_options<QF, O>(
+    base_client: &BaseClient,
+    operation: O,
+    options: RequestOptions,
+) -> Result<QF>
+where
+    O: Operation<QF> + Send,
+{
+    let response = operation
+        .send_request(base_client.owned_http_client(), options)
+        .await?;
+    // Resolver errors can leave valid-looking authorization data in a partial response.
+    if let Some(errors) = response.errors.as_ref()
+        && !errors.is_empty()
+    {
+        let messages = errors
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("GraphQL operation was rejected by the server: {messages}");
+    }
+    response
+        .data
+        .ok_or_else(|| anyhow!("Missing GraphQL response data"))
+}
 
 /// Sends a GraphQL operation through a base client supplied by the application.
 ///

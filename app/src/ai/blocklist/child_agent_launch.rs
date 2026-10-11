@@ -24,6 +24,7 @@ use crate::workspaces::user_workspaces::TeamScope;
 pub struct PreparedLocalOzChildLaunch {
     pub task_id: AmbientAgentTaskId,
     pub conversation_name: String,
+    pub definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
 }
 
 /// Creates the server task row shared by the GUI hidden-pane and TUI
@@ -33,6 +34,7 @@ pub fn prepare_local_oz_child_launch(
     name: &str,
     prompt: &str,
     parent_run_id: Option<&str>,
+    working_dir: std::path::PathBuf,
     team_scope: RequestTeamScope,
     ctx: &AppContext,
 ) -> impl Future<Output = anyhow::Result<PreparedLocalOzChildLaunch>> + 'static + use<> {
@@ -46,7 +48,7 @@ pub fn prepare_local_oz_child_launch(
             .create_agent_task(
                 prompt,
                 None,
-                parent_run_id,
+                parent_run_id.clone(),
                 Some(AgentConfigSnapshot {
                     name: agent_name,
                     ..Default::default()
@@ -54,9 +56,18 @@ pub fn prepare_local_oz_child_launch(
                 team_scope,
             )
             .await?;
+        let definitions = crate::ai::factory_definitions::prepare(
+            &task_id.to_string(),
+            None,
+            parent_run_id.as_deref(),
+            &working_dir,
+            ai_client.as_ref(),
+        )
+        .await?;
         Ok(PreparedLocalOzChildLaunch {
             task_id,
             conversation_name,
+            definitions,
         })
     }
 }

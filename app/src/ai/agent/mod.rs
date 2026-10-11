@@ -3354,6 +3354,30 @@ impl AIAgentInput {
         )
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn context_mut(&mut self) -> Option<&mut Arc<[AIAgentContext]>> {
+        match self {
+            Self::UserQuery { context, .. }
+            | Self::ActionResult { context, .. }
+            | Self::AutoCodeDiffQuery { context, .. }
+            | Self::ResumeConversation { context, .. }
+            | Self::InitProjectRules { context, .. }
+            | Self::CreateEnvironment { context, .. }
+            | Self::TriggerPassiveSuggestion { context, .. }
+            | Self::CreateNewProject { context, .. }
+            | Self::CloneRepository { context, .. }
+            | Self::CodeReview { context, .. }
+            | Self::InvokeSkill { context, .. }
+            | Self::StartFromAmbientRunPrompt { context, .. }
+            | Self::PassiveSuggestionResult { context, .. }
+            | Self::SummarizeConversation { context, .. } => Some(context),
+            Self::MessagesReceivedFromAgents { .. }
+            | Self::EventsFromAgents { .. }
+            | Self::OrchestrationConfigUpdate { .. }
+            | Self::AgentWake => None,
+        }
+    }
+
     pub fn context(&self) -> Option<&[AIAgentContext]> {
         match self {
             Self::UserQuery { context, .. }

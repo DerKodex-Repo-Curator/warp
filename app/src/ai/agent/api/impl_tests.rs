@@ -19,7 +19,10 @@ fn request_params_with_ask_user_question_enabled(ask_user_question_enabled: bool
         conversation_token: None,
         forked_from_conversation_token: None,
         ambient_agent_task_id: None,
+        #[cfg(not(target_family = "wasm"))]
+        factory_definition_session: None,
         tasks: vec![],
+        factory_definition_setup_ready: false,
         existing_suggestions: None,
         metadata: None,
         session_context: SessionContext::new_for_test(),

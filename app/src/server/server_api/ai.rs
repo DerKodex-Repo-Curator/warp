@@ -824,6 +824,7 @@ impl std::fmt::Debug for GitCredential {
 pub struct TaskGitCredentialsResponse {
     pub credentials: Vec<GitCredential>,
     pub failed_hosts: Vec<String>,
+    pub definition_credential: Option<GitCredential>,
 }
 
 /// Filter parameters for listing ambient agent tasks.
@@ -1263,6 +1264,19 @@ pub struct UpdateMemoryResponse {
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 pub trait AIClient: 'static + Send + Sync {
+    #[cfg(not(target_family = "wasm"))]
+    async fn get_local_task_root_scope(
+        &self,
+    ) -> anyhow::Result<warp_graphql::queries::local_task_root_scope::LocalTaskRootScope>;
+    #[cfg(not(target_family = "wasm"))]
+    async fn get_factory_definition_setup(
+        &self,
+        task_id: &str,
+        input: warp_graphql::queries::factory_definition_setup::FactoryDefinitionSetupInput,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<
+        Option<warp_graphql::queries::factory_definition_setup::FactoryDefinitionSetup>,
+    >;
     async fn generate_commands_from_natural_language(
         &self,
         prompt: String,
@@ -1773,7 +1787,13 @@ impl ServerApi {
             },
             request_context: get_request_context(),
         });
-        let response = self.send_graphql_request(operation, None).await?;
+        let response = warp_server_client::graphql_helpers::send_definition_setup_request(
+            &self.base_client,
+            operation,
+            None,
+            None,
+        )
+        .await?;
         let (config, attachments) = match response.task {
             BootstrapTaskResult::TaskOutput(output) => (
                 output.task.execution_config,
@@ -1891,7 +1911,7 @@ impl ServerApi {
         };
         let operation = TaskGitCredentials::build(variables);
         let response = self
-            .send_graphql_request(operation, None)
+            .send_definition_setup_graphql_request(operation, None, None)
             .await
             .map_err(TaskGitCredentialsError::Request)?;
 
@@ -1904,6 +1924,7 @@ impl ServerApi {
                         .map(into_git_credential)
                         .collect(),
                     failed_hosts: output.failed_hosts,
+                    definition_credential: output.definition_credential.map(into_git_credential),
                 })
             }
             TaskGitCredentialsResult::UserFacingError(error) => {
@@ -1942,6 +1963,7 @@ impl ServerApi {
                         .map(into_git_credential)
                         .collect(),
                     failed_hosts: Vec::new(),
+                    definition_credential: None,
                 })
             }
             TaskGitCredentialsLegacyResult::UserFacingError(error) => {
@@ -1970,8 +1992,9 @@ fn is_unknown_git_credential_schema_error(error: &TaskGitCredentialsError) -> bo
         return false;
     };
     let message = error.to_string();
-    let names_partial_refresh_field =
-        message.contains("failedHosts") || message.contains("acceptsPartialRefresh");
+    let names_partial_refresh_field = message.contains("failedHosts")
+        || message.contains("acceptsPartialRefresh")
+        || message.contains("definitionCredential");
     names_partial_refresh_field
         && (message.contains("Cannot query field")
             || message.contains("Unknown argument")
@@ -2009,6 +2032,53 @@ fn convert_upload_field(
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl AIClient for ServerApi {
+    #[cfg(not(target_family = "wasm"))]
+    async fn get_local_task_root_scope(
+        &self,
+    ) -> anyhow::Result<warp_graphql::queries::local_task_root_scope::LocalTaskRootScope> {
+        use warp_graphql::queries::local_task_root_scope::LocalTaskRootScopeQuery;
+        let response = warp_server_client::graphql_helpers::send_strict_graphql_request(
+            &self.base_client,
+            LocalTaskRootScopeQuery::build(()),
+            Some(Duration::from_secs(AI_ASSISTANT_REQUEST_TIMEOUT_SECONDS)),
+        )
+        .await?;
+        Ok(response.local_task_root_scope)
+    }
+    #[cfg(not(target_family = "wasm"))]
+    async fn get_factory_definition_setup(
+        &self,
+        task_id: &str,
+        input: warp_graphql::queries::factory_definition_setup::FactoryDefinitionSetupInput,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<
+        Option<warp_graphql::queries::factory_definition_setup::FactoryDefinitionSetup>,
+    > {
+        use warp_graphql::queries::factory_definition_setup::{
+            FactoryDefinitionQuery, FactoryDefinitionTaskResult, FactoryDefinitionVariables,
+        };
+        let operation = FactoryDefinitionQuery::build(FactoryDefinitionVariables {
+            task_input: TaskInput {
+                task_id: cynic::Id::new(task_id),
+            },
+            setup_input: input,
+            request_context: get_request_context(),
+        });
+        let response = self
+            .send_definition_setup_graphql_request(operation, Some(timeout), None)
+            .await?;
+        match response.task {
+            FactoryDefinitionTaskResult::TaskOutput(output) => {
+                Ok(output.task.factory_definition_setup)
+            }
+            FactoryDefinitionTaskResult::UserFacingError(error) => {
+                Err(anyhow!(get_user_facing_error_message(error)))
+            }
+            FactoryDefinitionTaskResult::Unknown => {
+                Err(anyhow!("Unknown factory definition task response"))
+            }
+        }
+    }
     async fn generate_commands_from_natural_language(
         &self,
         prompt: String,
@@ -2545,7 +2615,11 @@ impl AIClient for ServerApi {
 
         let operation = CreateAgentTask::build(variables);
         let response = self
-            .send_graphql_request_for_team(operation, team_scope)
+            .send_definition_setup_graphql_request(
+                operation,
+                None,
+                Self::team_uid_header_value(team_scope),
+            )
             .await?;
 
         match response.create_agent_task {

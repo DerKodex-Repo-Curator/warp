@@ -10,7 +10,10 @@ use http::StatusCode;
 use warp_graphql::client::{GraphQLError, RequestOptions};
 use warp_server_auth::auth_state::AuthState;
 
-use super::{send_graphql_request, send_team_scoped_graphql_request};
+use super::{
+    send_definition_setup_request, send_graphql_request, send_strict_graphql_request,
+    send_team_scoped_graphql_request,
+};
 use crate::auth::AuthEvent;
 use crate::base_client::{
     AuthenticatedGraphqlConfig, BaseClient, GraphqlRoutingConfig, TEAM_UID_HEADER,
@@ -18,18 +21,17 @@ use crate::base_client::{
 
 fn base_client(auth_state: AuthState) -> (BaseClient, async_channel::Receiver<AuthEvent>) {
     let (event_sender, event_receiver) = async_channel::unbounded();
-    (
-        BaseClient::new(
-            Arc::new(http_client::Client::new()),
-            Arc::new(auth_state),
-            event_sender,
-            None,
-            GraphqlRoutingConfig::default(),
-            AuthenticatedGraphqlConfig::default(),
-            None,
-        ),
-        event_receiver,
-    )
+    let client = BaseClient::new(
+        Arc::new(http_client::Client::new()),
+        Arc::new(auth_state),
+        event_sender,
+        None,
+        GraphqlRoutingConfig::default(),
+        AuthenticatedGraphqlConfig::default(),
+        None,
+    );
+    client.set_ambient_workload_token_for_test("fixture-workload-token".to_owned(), None);
+    (client, event_receiver)
 }
 
 #[test]
@@ -83,6 +85,7 @@ fn assert_user_disabled_event(event_receiver: &async_channel::Receiver<AuthEvent
 struct FakeGraphqlOperation {
     expected_auth_token: Option<String>,
     expected_team_uid: Option<String>,
+    expected_definition_capability: bool,
     send_count: Arc<AtomicUsize>,
     result: FakeGraphqlResult,
 }
@@ -91,6 +94,7 @@ enum FakeGraphqlResult {
     Success,
     Rejected(StatusCode),
     ResponseErrors(Vec<String>),
+    PartialDataWithErrors,
 }
 
 impl FakeGraphqlOperation {
@@ -100,6 +104,7 @@ impl FakeGraphqlOperation {
             expected_team_uid: None,
             send_count,
             result: FakeGraphqlResult::Success,
+            expected_definition_capability: false,
         }
     }
 
@@ -113,6 +118,7 @@ impl FakeGraphqlOperation {
             expected_team_uid: Some(expected_team_uid.to_string()),
             send_count,
             result: FakeGraphqlResult::Success,
+            expected_definition_capability: false,
         }
     }
 
@@ -126,6 +132,7 @@ impl FakeGraphqlOperation {
             expected_team_uid: None,
             send_count,
             result: FakeGraphqlResult::Rejected(status),
+            expected_definition_capability: false,
         }
     }
 
@@ -139,6 +146,7 @@ impl FakeGraphqlOperation {
             expected_team_uid: None,
             send_count,
             result: FakeGraphqlResult::ResponseErrors(messages),
+            expected_definition_capability: false,
         }
     }
 }
@@ -169,10 +177,26 @@ impl warp_graphql::client::Operation<()> for FakeGraphqlOperation {
                 self.expected_team_uid.as_ref()
             );
             self.send_count.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                options
+                    .headers
+                    .get(warp_graphql::queries::factory_definition_setup::CAPABILITY_HEADER)
+                    .map(String::as_str),
+                self.expected_definition_capability.then_some("1"),
+            );
             match self.result {
                 FakeGraphqlResult::Success => Ok(GraphQlResponse {
                     data: Some(()),
                     errors: None,
+                }),
+                FakeGraphqlResult::PartialDataWithErrors => Ok(GraphQlResponse {
+                    data: Some(()),
+                    errors: Some(vec![GraphQlError::new(
+                        "source access revoked".to_owned(),
+                        None,
+                        None,
+                        None,
+                    )]),
                 }),
                 FakeGraphqlResult::Rejected(status) => Err(GraphQLError::HttpError {
                     status,
@@ -194,6 +218,59 @@ impl warp_graphql::client::Operation<()> for FakeGraphqlOperation {
 
 fn has_error_message(error: &anyhow::Error, expected: &str) -> bool {
     error.chain().any(|cause| cause.to_string() == expected)
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn factory_branch_capability_does_not_leak_to_other_requests() {
+    let (base_client, _) = externally_authenticated_base_client("daemon-token");
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut operation =
+        FakeGraphqlOperation::successful_for_team(Some("daemon-token"), "team-uid", count.clone());
+    operation.expected_definition_capability = true;
+    block_on(send_definition_setup_request(
+        &base_client,
+        operation,
+        None,
+        Some("team-uid".to_owned()),
+    ))
+    .unwrap();
+    block_on(send_graphql_request(
+        &base_client,
+        FakeGraphqlOperation::successful(Some("daemon-token"), count.clone()),
+        None,
+    ))
+    .unwrap();
+
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn factory_branch_partial_data_cannot_hide_setup_denial() {
+    let (base_client, _) = refreshable_base_client();
+    let mut operation = FakeGraphqlOperation::successful(None, Arc::new(AtomicUsize::new(0)));
+    operation.expected_definition_capability = cfg!(not(target_family = "wasm"));
+    operation.result = FakeGraphqlResult::PartialDataWithErrors;
+
+    let error = block_on(send_definition_setup_request(
+        &base_client,
+        operation,
+        None,
+        None,
+    ))
+    .unwrap_err();
+    assert!(error.to_string().contains("source access revoked"));
+}
+
+#[test]
+fn factory_branch_root_scope_rejects_partial_data_without_capability() {
+    let (base_client, _) = externally_authenticated_base_client("daemon-token");
+    let mut operation =
+        FakeGraphqlOperation::successful(Some("daemon-token"), Arc::new(AtomicUsize::new(0)));
+    operation.result = FakeGraphqlResult::PartialDataWithErrors;
+
+    let error = block_on(send_strict_graphql_request(&base_client, operation, None)).unwrap_err();
+    assert!(error.to_string().contains("source access revoked"));
 }
 
 #[test]
