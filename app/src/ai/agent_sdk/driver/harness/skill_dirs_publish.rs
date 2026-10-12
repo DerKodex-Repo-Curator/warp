@@ -66,6 +66,22 @@ const SANDBOX_BACKUP_SUFFIX: &str = ".backup";
 /// Prefix used to publish a skill under an alternate name outside a sandbox,
 /// when a real, non-symlink entry already occupies its real name.
 const NON_SANDBOX_ALTERNATE_NAME_PREFIX: &str = "warp-";
+pub(crate) fn publish_skills_for_agent_compatible_harness(
+    workspace_root: &Path,
+    harness_working_dir: &Path,
+    skill_dirs: &[PathBuf],
+    has_deferred_repositories: bool,
+) -> Result<Vec<PathBuf>> {
+    let published = publish_skills_for_harness(
+        &harness_working_dir.join(".agents").join("skills"),
+        workspace_root,
+        warp_isolation_platform::detect().is_some(),
+        skill_dirs,
+        has_deferred_repositories,
+    )?;
+    exclude_published_skill_paths_from_git(harness_working_dir, &published);
+    Ok(published)
+}
 
 pub(super) fn publish_skills_for_harness(
     skill_root: &Path,

@@ -10,7 +10,7 @@ use warp_cli::agent::{Harness, HarnessTransport};
 use crate::ai::agent_sdk::driver::AgentDriverError;
 use crate::ai::agent_sdk::driver::harness::claude_code::prepare_claude_environment_config;
 use crate::ai::agent_sdk::driver::harness::{
-    HarnessKind, harness_kind, harness_model_env_vars,
+    HarnessKind, harness_kind, harness_model_env_vars, publish_skills_for_agent_compatible_harness,
     remove_claude_externally_managed_listener_env_vars,
 };
 use crate::ai::agent_sdk::{task_env_vars, validate_cli_installed};
@@ -258,11 +258,29 @@ pub(super) async fn prepare_local_harness_child_launch(
             // auth/session state. Do not run the shared Codex environment prep
             // here: it can seed OPENAI_API_KEY into ~/.codex/auth.json and
             // rewrite ~/.codex/config.toml for the whole machine.
+            if definitions.is_some() {
+                publish_skills_for_agent_compatible_harness(
+                    &working_dir,
+                    &working_dir,
+                    &skill_dirs,
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+            }
             build_local_codex_child_command(&prompt)
         }
         Harness::OpenCode => {
             validate_cli_installed("opencode", Some("https://opencode.ai/docs"))
                 .map_err(|error: AgentDriverError| error.to_string())?;
+            if definitions.is_some() {
+                publish_skills_for_agent_compatible_harness(
+                    &working_dir,
+                    &working_dir,
+                    &skill_dirs,
+                    false,
+                )
+                .map_err(|error| error.to_string())?;
+            }
             build_local_opencode_child_command(&prompt)
         }
         Harness::Gemini => unreachable!("normalize_local_child_harness filters out Gemini"),
