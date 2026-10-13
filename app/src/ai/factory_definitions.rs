@@ -426,9 +426,16 @@ fn read_selected_skills(dirs: &[PathBuf]) -> anyhow::Result<Vec<ai::skills::Pars
     let mut skills = Vec::new();
     let mut names = HashSet::new();
     for dir in dirs {
-        let mut paths = std::fs::read_dir(dir)?
-            .map(|entry| entry.map(|entry| entry.path().join("SKILL.md")))
-            .collect::<Result<Vec<_>, _>>()?;
+        if !validate_optional_skill_directory(dir)? {
+            continue;
+        }
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if std::fs::metadata(&path)?.is_dir() {
+                paths.push(path.join("SKILL.md"));
+            }
+        }
         paths.sort();
         for path in paths {
             if !path.try_exists()? {
@@ -444,6 +451,22 @@ fn read_selected_skills(dirs: &[PathBuf]) -> anyhow::Result<Vec<ai::skills::Pars
         }
     }
     Ok(skills)
+}
+
+fn validate_optional_skill_directory(path: &Path) -> anyhow::Result<bool> {
+    for ancestor in path.ancestors() {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                if !std::fs::metadata(ancestor)?.is_dir() {
+                    bail!("Factory skill directory path contains a non-directory");
+                }
+                return Ok(ancestor == path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    bail!("Factory skill directory has no existing ancestor")
 }
 
 fn validate_metadata(metadata: &FactoryDefinitionSetup) -> anyhow::Result<()> {
@@ -726,8 +749,11 @@ fn validate_checkout(definitions: &ActivatedDefinitions) -> anyhow::Result<()> {
         }
     }
     for dir in &definitions.skill_dirs {
-        if !dunce::canonicalize(dir)?.starts_with(&root) || !dir.is_dir() {
-            bail!("Factory skill directory escapes its immutable leaf or is missing");
+        if !validate_optional_skill_directory(dir)? {
+            continue;
+        }
+        if !dunce::canonicalize(dir)?.starts_with(&root) {
+            bail!("Factory skill directory escapes its immutable leaf");
         }
     }
     Ok(())

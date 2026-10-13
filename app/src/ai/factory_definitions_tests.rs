@@ -10,13 +10,15 @@ struct GitFixture {
     second: String,
 }
 
-fn commit_skill(repo: &Repository, body: &str) -> String {
-    let path = repo.workdir().unwrap().join("skills/example");
-    std::fs::create_dir_all(&path).unwrap();
-    std::fs::write(path.join("SKILL.md"), body).unwrap();
+fn commit_files(repo: &Repository, files: &[(&str, &str)]) -> String {
+    for (path, contents) in files {
+        let path = repo.workdir().unwrap().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
     let mut index = repo.index().unwrap();
     index
-        .add_path(Path::new("skills/example/SKILL.md"))
+        .add_all(["*"], git2::IndexAddOption::DEFAULT, None)
         .unwrap();
     let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
     let signature = Signature::now("Fixture", "fixture@example.invalid").unwrap();
@@ -25,7 +27,7 @@ fn commit_skill(repo: &Repository, body: &str) -> String {
         Some("HEAD"),
         &signature,
         &signature,
-        body,
+        "Definition files",
         &tree,
         &parent.iter().collect::<Vec<_>>(),
     )
@@ -34,6 +36,24 @@ fn commit_skill(repo: &Repository, body: &str) -> String {
 }
 
 fn fixture_process(test: &str) -> Option<GitFixture> {
+    fixture_process_with_files(
+        test,
+        &[(
+            "skills/example/SKILL.md",
+            "---\nname: example\ndescription: First revision\n---\nRead A.\n",
+        )],
+        &[(
+            "skills/example/SKILL.md",
+            "---\nname: example\ndescription: Second revision\n---\nRead B.\n",
+        )],
+    )
+}
+
+fn fixture_process_with_files(
+    test: &str,
+    first_files: &[(&str, &str)],
+    second_files: &[(&str, &str)],
+) -> Option<GitFixture> {
     if let Some(root) = std::env::var_os("WARP_DEFINITION_GIT_FIXTURE") {
         let root = PathBuf::from(root);
         let source = Repository::open(root.join("source")).unwrap();
@@ -46,14 +66,8 @@ fn fixture_process(test: &str) -> Option<GitFixture> {
     }
     let root = tempfile::tempdir().unwrap();
     let source = Repository::init(root.path().join("source")).unwrap();
-    commit_skill(
-        &source,
-        "---\nname: example\ndescription: First revision\n---\nRead A.\n",
-    );
-    commit_skill(
-        &source,
-        "---\nname: example\ndescription: Second revision\n---\nRead B.\n",
-    );
+    commit_files(&source, first_files);
+    commit_files(&source, second_files);
     Repository::clone(
         source.workdir().unwrap().to_str().unwrap(),
         root.path().join("working"),
@@ -104,6 +118,93 @@ fn ready_client(metadata: FactoryDefinitionSetup) -> MockAIClient {
         .expect_get_factory_definition_setup()
         .returning(move |_, _, _| Ok(Some(metadata.clone())));
     client
+}
+
+async fn assert_skill_layout_activates(
+    test: &str,
+    files: &[(&str, &str)],
+    expected_names: &[&str],
+) {
+    let Some(fixture) = fixture_process_with_files(test, files, files) else {
+        return;
+    };
+    let mut source = metadata(&fixture.second);
+    source.skill_dirs = vec!["agents/reviewer/skills".into(), "skills".into()];
+    let definitions = prepare(
+        "layout",
+        None,
+        None,
+        &fixture.working,
+        &ready_client(source),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(
+        definitions
+            .skills
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>(),
+        expected_names
+    );
+}
+
+#[tokio::test]
+async fn factory_branch_native_git_activates_without_skill_roots() {
+    assert_skill_layout_activates(
+        "factory_branch_native_git_activates_without_skill_roots",
+        &[("README.md", "Factory definitions without skills.")],
+        &[],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn factory_branch_native_git_activates_factory_only_skills() {
+    assert_skill_layout_activates(
+        "factory_branch_native_git_activates_factory_only_skills",
+        &[(
+            "skills/example/SKILL.md",
+            "---\nname: example\ndescription: Factory skill\n---\nRead selected assets.\n",
+        )],
+        &["example"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn factory_branch_native_git_activates_agent_only_skills() {
+    assert_skill_layout_activates(
+        "factory_branch_native_git_activates_agent_only_skills",
+        &[(
+            "agents/reviewer/skills/example/SKILL.md",
+            "---\nname: example\ndescription: Agent skill\n---\nRead selected assets.\n",
+        )],
+        &["example"],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn factory_branch_native_git_ignores_ordinary_skill_root_files() {
+    assert_skill_layout_activates(
+        "factory_branch_native_git_ignores_ordinary_skill_root_files",
+        &[
+            (
+                "agents/reviewer/skills/agent/SKILL.md",
+                "---\nname: agent\ndescription: Agent skill\n---\nRead selected assets.\n",
+            ),
+            (
+                "skills/factory/SKILL.md",
+                "---\nname: factory\ndescription: Factory skill\n---\nRead selected assets.\n",
+            ),
+            ("skills/README.md", "Skill documentation."),
+        ],
+        &["agent", "factory"],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -445,6 +546,75 @@ fn factory_branch_invalid_selected_skill_cannot_fall_back_to_an_ordinary_name() 
     std::fs::write(&skill, [0xff, 0xfe]).unwrap();
 
     assert!(read_selected_skills(&[dir.path().to_path_buf()]).is_err());
+}
+
+#[test]
+fn factory_branch_existing_non_directory_skill_root_is_rejected() {
+    let root = tempfile::tempdir().unwrap();
+    let skills = root.path().join("skills");
+    std::fs::write(&skills, "Not a skill directory.").unwrap();
+
+    assert!(read_selected_skills(&[skills]).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn factory_branch_absent_skill_root_does_not_hide_a_dangling_ancestor() {
+    let root = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("missing-agent", root.path().join("agent")).unwrap();
+
+    assert!(read_selected_skills(&[root.path().join("agent/skills")]).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn factory_branch_absent_optional_roots_do_not_bypass_symlink_containment() {
+    let outside = tempfile::tempdir().unwrap();
+    for target in [Path::new("missing-agent"), outside.path()] {
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(target, root.path().join("agent")).unwrap();
+        let definitions = ActivatedDefinitions {
+            metadata: metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            root: dunce::canonicalize(root.path()).unwrap(),
+            skill_dirs: vec![root.path().join("agent/skills")],
+            skills: Vec::new(),
+            setup_deadline: Instant::now() + SETUP_BUDGET,
+        };
+
+        assert!(
+            validate_checkout(&definitions).is_err(),
+            "Accepted an absent skill root through {}",
+            target.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn factory_branch_contained_directory_symlinks_remain_discoverable() {
+    let root = tempfile::tempdir().unwrap();
+    let skill = root.path().join("assets/example/SKILL.md");
+    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    std::fs::write(
+        skill,
+        "---\nname: example\ndescription: Contained skill\n---\nRead selected assets.\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join("skills")).unwrap();
+    std::os::unix::fs::symlink("../assets/example", root.path().join("skills/linked")).unwrap();
+    std::os::unix::fs::symlink("skills", root.path().join("skills-alias")).unwrap();
+    let definitions = ActivatedDefinitions {
+        metadata: metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        root: dunce::canonicalize(root.path()).unwrap(),
+        skill_dirs: vec![root.path().join("skills-alias")],
+        skills: Vec::new(),
+        setup_deadline: Instant::now() + SETUP_BUDGET,
+    };
+
+    validate_checkout(&definitions).unwrap();
+    let skills = read_selected_skills(&definitions.skill_dirs).unwrap();
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "example");
 }
 
 #[tokio::test]
