@@ -81,88 +81,6 @@ enum ShellRecovery {
 }
 
 impl ShellCommandExecutor {
-    #[cfg(not(target_family = "wasm"))]
-    pub(crate) fn prepare_factory_environment(
-        &mut self,
-        environment: HashMap<std::ffi::OsString, std::ffi::OsString>,
-        deadline: instant::Instant,
-        ctx: &mut ModelContext<Self>,
-    ) -> anyhow::Result<impl std::future::Future<Output = anyhow::Result<()>> + use<>> {
-        use crate::terminal::model::session::command_executor::shell_escape_single_quotes;
-        let shell = self
-            .active_session
-            .as_ref(ctx)
-            .shell_type(ctx)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Factory definition setup requires a bootstrapped shell")
-            })?;
-        let block_id = {
-            let model = self.terminal_model.lock();
-            let block = model.block_list().active_block();
-            if block.is_executing() || !block.is_bootstrapped() {
-                anyhow::bail!("Factory definition setup requires an idle bootstrapped shell");
-            }
-            block.id().clone()
-        };
-        let mut assignments = environment.iter().collect::<Vec<_>>();
-        assignments.sort_by_key(|(name, _)| *name);
-        let assignments = assignments
-            .into_iter()
-            .map(|(name, value)| {
-                let name = name.to_string_lossy();
-                let value = shell_escape_single_quotes(&value.to_string_lossy(), shell);
-                match shell {
-                    ShellType::Bash | ShellType::Zsh => format!("{name}='{value}'"),
-                    ShellType::Fish => format!("set -gx {name} '{value}'"),
-                    ShellType::PowerShell => format!("$env:{name} = '{value}'"),
-                }
-            })
-            .collect::<Vec<_>>();
-        let command = match shell {
-            ShellType::Bash | ShellType::Zsh => format!("export {}", assignments.join(" ")),
-            ShellType::Fish => assignments.join("; and "),
-            ShellType::PowerShell => format!(
-                "& {{ $ErrorActionPreference = 'Stop'; {} }}",
-                assignments.join("; ")
-            ),
-        };
-        let selector = BlockSelector::Id(block_id.clone());
-        let delay = deadline
-            .checked_duration_since(instant::Instant::now())
-            .ok_or_else(|| anyhow::anyhow!("Factory definition setup deadline expired"))?;
-        let completion = self.action_result_future(
-            selector.clone(),
-            Some(ShellCommandDelay::Duration(delay)),
-            ctx,
-        );
-        let spawner = ctx.spawner();
-        ctx.emit(ShellCommandExecutorEvent::PrepareFactoryEnvironment { block_id, command });
-        Ok(async move {
-            let result = completion.await;
-            let dispatched = spawner
-                .spawn(move |executor, _| {
-                    executor.remove_poll_senders(&selector);
-                    selector
-                        .get_block(&executor.terminal_model.lock())
-                        .is_some_and(Block::is_hidden)
-                })
-                .await?;
-            match result {
-                ActionResult::CommandFinished { exit_code, .. }
-                    if dispatched && exit_code.was_successful() =>
-                {
-                    Ok(())
-                }
-                ActionResult::CommandFinished { .. }
-                | ActionResult::LongRunningCommandSnapshot { .. }
-                | ActionResult::ShellRecovered(_)
-                | ActionResult::Cancelled
-                | ActionResult::BlockNotFound => {
-                    anyhow::bail!("Could not activate factory definitions in the shell")
-                }
-            }
-        })
-    }
     pub const MAX_WAIT_DURATION: Duration = Duration::from_secs(2);
     /// Maximum delay we will honor for any agent-requested wait. Applies both  
     /// to finite `ShellCommandDelay::Duration` requests and to  
@@ -1285,10 +1203,6 @@ fn action_result_for_transfer_shell_command_control_to_user(
 
 #[derive(Debug, Clone)]
 pub enum ShellCommandExecutorEvent {
-    PrepareFactoryEnvironment {
-        block_id: BlockId,
-        command: String,
-    },
     ExecuteCommand {
         action_id: AIAgentActionId,
         command: String,

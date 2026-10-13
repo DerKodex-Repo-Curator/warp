@@ -1273,15 +1273,11 @@ impl AgentDriver {
             ctx,
         )?;
         let computer_use_configured = computer_use_config.is_some();
-        if let Some(task_id) = task_id {
-            let session = crate::ai::factory_definitions::DefinitionSession::loaded(
-                task_id.to_string(),
-                workspace.factory_definitions.clone(),
-            );
+        if let Some(definitions) = &workspace.factory_definitions {
             let terminal_view = terminal_driver.as_ref(ctx).terminal_view().clone();
             terminal_view.update(ctx, |terminal, ctx| {
-                terminal.ai_controller().update(ctx, |controller, _| {
-                    controller.set_factory_definition_session(session);
+                terminal.ai_controller().update(ctx, |controller, ctx| {
+                    controller.set_factory_definitions(Some(definitions.clone()), ctx);
                 });
             });
         }

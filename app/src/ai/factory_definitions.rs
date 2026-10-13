@@ -2,43 +2,66 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use command::Stdio;
 use command::r#async::Command;
 use futures::AsyncWriteExt as _;
-use futures::lock::Mutex;
-use instant::Instant;
 use uuid::Uuid;
-use warp_graphql::queries::factory_definition_setup::{
-    FactoryDefinitionSetup, FactoryDefinitionSetupInput, FactoryDefinitionSetupPhase,
-};
+use warp_graphql::queries::execution_config::FactoryDefinitionConfig;
 
-use crate::server::server_api::ai::{AIClient, GitCredential};
+use crate::server::server_api::ai::GitCredential;
+pub(crate) async fn prepare_child(
+    task_id: &str,
+    working_dir: &Path,
+    factory_preview: bool,
+    client: &dyn crate::server::server_api::ai::AIClient,
+) -> anyhow::Result<Option<ActivatedDefinitions>> {
+    if !factory_preview {
+        return Ok(None);
+    }
+    let config = client
+        .get_factory_definition_config(task_id)
+        .await?
+        .context("Factory child execution configuration has no selected definitions")?;
+    prepare_from_config(task_id, working_dir, Some(&config)).await
+}
 
 const SETUP_BUDGET: Duration = Duration::from_secs(30);
-
-pub(crate) async fn require_production_root(client: &dyn AIClient) -> anyhow::Result<()> {
-    use warp_graphql::queries::local_task_root_scope::LocalTaskRootScope;
-
-    match client.get_local_task_root_scope().await? {
-        LocalTaskRootScope::Production => Ok(()),
-        LocalTaskRootScope::Preview => {
-            bail!("Factory preview launches require an existing task ID or parent run")
-        }
-        LocalTaskRootScope::Unavailable => bail!("Local task root scope is unavailable"),
-    }
+pub(crate) async fn prepare_from_config(
+    task_id: &str,
+    working_dir: &Path,
+    config: Option<&warp_graphql::queries::execution_config::FactoryDefinitionConfig>,
+) -> anyhow::Result<Option<ActivatedDefinitions>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let metadata = config.clone();
+    validate_metadata(&metadata)?;
+    async_compat::Compat::new(async {
+        tokio::time::timeout(SETUP_BUDGET, async {
+            let credential =
+                match super::agent_sdk::driver::git_credentials::definition_credential(task_id) {
+                    Some(credential) => Some(credential),
+                    None => installed_credential(working_dir, &metadata).await?,
+                };
+            let mut definitions = materialize(working_dir, &metadata, credential.as_ref()).await?;
+            definitions.skills = read_selected_skills(&definitions.skill_dirs)?;
+            Ok(Some(definitions))
+        })
+        .await
+        .context("Factory definition checkout timed out")?
+    })
+    .await
 }
 
 #[derive(Clone, Debug)]
 pub struct ActivatedDefinitions {
-    pub metadata: FactoryDefinitionSetup,
+    pub metadata: FactoryDefinitionConfig,
     pub root: PathBuf,
     pub skill_dirs: Vec<PathBuf>,
     pub(crate) skills: Vec<ai::skills::ParsedSkill>,
-    pub(crate) setup_deadline: Instant,
 }
 
 impl ActivatedDefinitions {
@@ -123,255 +146,6 @@ impl ActivatedDefinitions {
     }
 }
 
-struct LoadedDefinitions {
-    definitions: Option<ActivatedDefinitions>,
-    environment_applied: bool,
-}
-
-#[derive(Clone, Default)]
-pub struct DefinitionSession(Arc<Mutex<HashMap<String, LoadedDefinitions>>>);
-
-impl std::fmt::Debug for DefinitionSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("DefinitionSession")
-    }
-}
-
-impl DefinitionSession {
-    pub fn loaded(task_id: String, definitions: Option<ActivatedDefinitions>) -> Self {
-        Self(Arc::new(Mutex::new(HashMap::from([(
-            task_id,
-            LoadedDefinitions {
-                definitions,
-                environment_applied: true,
-            },
-        )]))))
-    }
-
-    pub async fn prepare(
-        &self,
-        task_id: &str,
-        working_dir: Option<&Path>,
-        client: &dyn AIClient,
-    ) -> anyhow::Result<Option<ActivatedDefinitions>> {
-        let mut loaded = self.0.lock().await;
-        if let Some(loaded) = loaded.get(task_id) {
-            return Ok(loaded.definitions.clone());
-        }
-        let preparation = DefinitionPreparation::load(task_id, None, client).await?;
-        let definitions = if preparation.metadata.is_some() {
-            preparation
-                .activate(
-                    task_id,
-                    None,
-                    None,
-                    working_dir.context("Factory definition setup requires a working directory")?,
-                    client,
-                )
-                .await?
-        } else {
-            None
-        };
-        loaded.insert(
-            task_id.to_owned(),
-            LoadedDefinitions {
-                definitions: definitions.clone(),
-                environment_applied: false,
-            },
-        );
-        Ok(definitions)
-    }
-
-    pub(crate) async fn environment_pending(&self, task_id: &str) -> bool {
-        self.0
-            .lock()
-            .await
-            .get(task_id)
-            .is_some_and(|loaded| loaded.definitions.is_some() && !loaded.environment_applied)
-    }
-
-    pub(crate) async fn environment_applied(&self, task_id: &str) {
-        if let Some(loaded) = self.0.lock().await.get_mut(task_id) {
-            loaded.environment_applied = true;
-        }
-    }
-}
-
-pub(crate) async fn prepare(
-    task_id: &str,
-    execution_id: Option<&str>,
-    parent_run_id: Option<&str>,
-    working_dir: &Path,
-    client: &dyn AIClient,
-) -> anyhow::Result<Option<ActivatedDefinitions>> {
-    let preparation = DefinitionPreparation::load(task_id, execution_id, client).await?;
-    preparation
-        .activate(task_id, execution_id, parent_run_id, working_dir, client)
-        .await
-}
-
-pub(crate) struct DefinitionPreparation {
-    metadata: Option<FactoryDefinitionSetup>,
-    deadline: Instant,
-}
-
-impl DefinitionPreparation {
-    pub async fn load(
-        task_id: &str,
-        execution_id: Option<&str>,
-        client: &dyn AIClient,
-    ) -> anyhow::Result<Self> {
-        let deadline = Instant::now() + SETUP_BUDGET;
-        let metadata = client
-            .get_factory_definition_setup(
-                task_id,
-                setup_input(FactoryDefinitionSetupPhase::Metadata, execution_id, None),
-                remaining(deadline)?,
-            )
-            .await?;
-        if let Some(metadata) = &metadata {
-            validate_metadata(metadata)?;
-        }
-        Ok(Self { metadata, deadline })
-    }
-
-    pub fn is_local_preview(&self) -> bool {
-        self.metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.local)
-    }
-
-    pub async fn activate(
-        self,
-        task_id: &str,
-        execution_id: Option<&str>,
-        parent_run_id: Option<&str>,
-        working_dir: &Path,
-        client: &dyn AIClient,
-    ) -> anyhow::Result<Option<ActivatedDefinitions>> {
-        let Self { metadata, deadline } = self;
-        let Some(mut metadata) = metadata else {
-            return Ok(None);
-        };
-        async_compat::Compat::new(async {
-            tokio::time::timeout(remaining(deadline)?, async {
-                let identity = metadata.clone();
-                let mut heads = HashSet::new();
-                loop {
-                    validate_metadata(&metadata)?;
-                    if heads.insert(metadata.source_sha.clone()) && heads.len() > 3 {
-                        bail!("Factory branch head moved beyond the definition setup budget");
-                    }
-                    let checked = client
-                        .get_factory_definition_setup(
-                            task_id,
-                            setup_input(
-                                FactoryDefinitionSetupPhase::Materialize,
-                                execution_id,
-                                Some(&metadata),
-                            ),
-                            remaining(deadline)?,
-                        )
-                        .await?
-                        .context(
-                            "Factory preview context became unavailable before materialization",
-                        )?;
-                    ensure_identity(&identity, &checked)?;
-                    if checked.source_sha != metadata.source_sha {
-                        metadata = checked;
-                        continue;
-                    }
-                    let credential =
-                        super::agent_sdk::driver::git_credentials::definition_credential(task_id)
-                            .or_else(|| {
-                                metadata
-                                    .local
-                                    .then(|| {
-                                        parent_run_id.and_then(
-                            super::agent_sdk::driver::git_credentials::definition_credential,
-                        )
-                                    })
-                                    .flatten()
-                            });
-                    let credential = match credential {
-                        Some(credential) => Some(credential),
-                        None => installed_credential(working_dir, &metadata).await?,
-                    };
-                    let mut definitions =
-                        materialize(working_dir, &metadata, credential.as_ref()).await?;
-                    let activated = client
-                        .get_factory_definition_setup(
-                            task_id,
-                            setup_input(
-                                FactoryDefinitionSetupPhase::Activate,
-                                execution_id,
-                                Some(&metadata),
-                            ),
-                            remaining(deadline)?,
-                        )
-                        .await?
-                        .context("Factory preview context became unavailable before activation")?;
-                    ensure_identity(&identity, &activated)?;
-                    if activated.source_sha != metadata.source_sha {
-                        metadata = activated;
-                        continue;
-                    }
-                    validate_checkout(&definitions)?;
-                    definitions.skills = read_selected_skills(&definitions.skill_dirs)?;
-                    definitions.setup_deadline = deadline;
-                    log::info!(
-                        "Factory definitions activated: branch_id={} source_sha={}",
-                        metadata.branch_id.inner(),
-                        metadata.source_sha,
-                    );
-                    return Ok(Some(definitions));
-                }
-            })
-            .await
-            .context("Factory definition setup exceeded its 30 second deadline")?
-        })
-        .await
-    }
-}
-
-fn remaining(deadline: Instant) -> anyhow::Result<Duration> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .context("Factory definition setup deadline expired")
-}
-
-fn setup_input(
-    phase: FactoryDefinitionSetupPhase,
-    execution_id: Option<&str>,
-    metadata: Option<&FactoryDefinitionSetup>,
-) -> FactoryDefinitionSetupInput {
-    FactoryDefinitionSetupInput {
-        phase,
-        execution_id: execution_id.map(cynic::Id::new),
-        branch_id: metadata.map(|metadata| metadata.branch_id.clone()),
-        source_fingerprint: metadata.map(|metadata| metadata.source_fingerprint.clone()),
-        source_sha: metadata.map(|metadata| metadata.source_sha.clone()),
-    }
-}
-
-fn ensure_identity(
-    expected: &FactoryDefinitionSetup,
-    actual: &FactoryDefinitionSetup,
-) -> anyhow::Result<()> {
-    validate_metadata(actual)?;
-    if expected.factory_id != actual.factory_id
-        || expected.branch_id != actual.branch_id
-        || expected.branch != actual.branch
-        || expected.source_fingerprint != actual.source_fingerprint
-        || expected.repository_url != actual.repository_url
-        || expected.local != actual.local
-        || (expected.source_sha == actual.source_sha && expected.skill_dirs != actual.skill_dirs)
-    {
-        bail!("Factory definition source identity changed");
-    }
-    Ok(())
-}
-
 pub(crate) fn is_definition_path(path: &Path) -> bool {
     let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     canonical
@@ -383,27 +157,6 @@ pub(crate) fn is_definition_path(path: &Path) -> bool {
         })
 }
 
-pub(crate) fn remove_definition_skill_context(inputs: &mut [super::agent::AIAgentInput]) {
-    use ai::skills::SkillReference;
-
-    use super::agent::AIAgentContext;
-
-    for input in inputs {
-        let Some(context) = input.context_mut() else {
-            continue;
-        };
-        let mut entries = context.to_vec();
-        for entry in &mut entries {
-            if let AIAgentContext::Skills { skills } = entry {
-                skills.retain(|skill| {
-                    !matches!(&skill.reference, SkillReference::Path(path)
-                    if path.to_local_path().is_some_and(is_definition_path))
-                });
-            }
-        }
-        *context = entries.into();
-    }
-}
 pub(crate) fn check_authored_skill_path(
     spec: &warp_cli::skill::SkillSpec,
     working_dir: &Path,
@@ -469,7 +222,7 @@ fn validate_optional_skill_directory(path: &Path) -> anyhow::Result<bool> {
     bail!("Factory skill directory has no existing ancestor")
 }
 
-fn validate_metadata(metadata: &FactoryDefinitionSetup) -> anyhow::Result<()> {
+fn validate_metadata(metadata: &FactoryDefinitionConfig) -> anyhow::Result<()> {
     let branch = metadata.branch_id.inner();
     if branch.is_empty()
         || !branch
@@ -527,7 +280,7 @@ fn real_directory(path: &Path) -> anyhow::Result<()> {
 
 async fn materialize(
     working_dir: &Path,
-    metadata: &FactoryDefinitionSetup,
+    metadata: &FactoryDefinitionConfig,
     credential: Option<&GitCredential>,
 ) -> anyhow::Result<ActivatedDefinitions> {
     validate_metadata(metadata)?;
@@ -594,7 +347,6 @@ async fn materialize(
             .collect(),
         root,
         skills: Vec::new(),
-        setup_deadline: Instant::now() + SETUP_BUDGET,
     };
     validate_checkout(&definitions)?;
     Ok(definitions)
@@ -602,7 +354,7 @@ async fn materialize(
 
 fn temporary_credential(
     credential: &GitCredential,
-    metadata: &FactoryDefinitionSetup,
+    metadata: &FactoryDefinitionConfig,
 ) -> anyhow::Result<tempfile::NamedTempFile> {
     let repository = url::Url::parse(&metadata.repository_url)?;
     if repository.host_str() != Some(&credential.host) || credential.token.is_empty() {
@@ -623,7 +375,7 @@ fn temporary_credential(
 
 async fn installed_credential(
     working_dir: &Path,
-    metadata: &FactoryDefinitionSetup,
+    metadata: &FactoryDefinitionConfig,
 ) -> anyhow::Result<Option<GitCredential>> {
     let mut child = Command::new("git")
         .current_dir(working_dir)

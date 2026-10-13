@@ -138,7 +138,7 @@ pub use crate::ai::conversation_export::{
     ConversationFileExport, ConversationFileExportError, export_conversation_markdown,
 };
 #[cfg(not(target_family = "wasm"))]
-pub use crate::ai::factory_definitions::{ActivatedDefinitions, DefinitionSession};
+pub use crate::ai::factory_definitions::ActivatedDefinitions;
 pub use crate::ai::get_relevant_files::controller::GetRelevantFilesController;
 pub use crate::ai::harness_availability::{
     AuthSecretEntry, AuthSecretFetchState, HarnessAvailability, HarnessAvailabilityEvent,

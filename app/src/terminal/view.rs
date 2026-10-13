@@ -7867,21 +7867,6 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
-            ShellCommandExecutorEvent::PrepareFactoryEnvironment { block_id, command } => {
-                let Some(session_id) = self.active_block_session_id() else {
-                    return;
-                };
-                ctx.emit(Event::ExecuteCommand(ExecuteCommandEvent {
-                    command: command.clone(),
-                    session_id,
-                    workflow_id: None,
-                    workflow_command: None,
-                    should_add_command_to_history: false,
-                    source: CommandExecutionSource::FactoryDefinitionSetup {
-                        block_id: block_id.clone(),
-                    },
-                }));
-            }
             ShellCommandExecutorEvent::ExecuteCommand { command, action_id } => {
                 let Some(session_id) = self.active_block_session_id() else {
                     return;

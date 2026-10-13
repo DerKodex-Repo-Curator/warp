@@ -1,13 +1,61 @@
+use std::sync::Arc;
+
 use command::blocking::Command as BlockingCommand;
 use git2::{Repository, Signature};
 
 use super::*;
-use crate::server::server_api::ai::MockAIClient;
 
 struct GitFixture {
     working: PathBuf,
     first: String,
     second: String,
+}
+#[tokio::test]
+async fn factory_branch_child_requires_selected_execution_config() {
+    let root = tempfile::tempdir().unwrap();
+    let mut client = crate::server::server_api::ai::MockAIClient::new();
+    client
+        .expect_get_factory_definition_config()
+        .withf(|task_id| task_id == "child")
+        .times(1)
+        .returning(|_| Ok(None));
+    assert!(
+        prepare_child("child", root.path(), true, &client)
+            .await
+            .is_err()
+    );
+    assert!(!root.path().join(".warp").exists());
+}
+#[tokio::test]
+async fn factory_branch_execution_config_missing_commit_fails_without_fallback() {
+    let Some(fixture) =
+        fixture_process("factory_branch_execution_config_missing_commit_fails_without_fallback")
+    else {
+        return;
+    };
+    let config = warp_graphql::queries::execution_config::FactoryDefinitionConfig {
+        factory_id: cynic::Id::new("factory"),
+        branch_id: cynic::Id::new("preview-one"),
+        branch: "preview".into(),
+        source_sha: "0".repeat(40),
+        repository_url: "https://fixture.invalid/definitions".into(),
+        skill_dirs: vec!["skills".into()],
+    };
+    assert!(
+        prepare_from_config("missing", &fixture.working, Some(&config))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        Repository::open(&fixture.working)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap()
+            .to_string(),
+        fixture.second,
+    );
 }
 
 fn commit_files(repo: &Repository, files: &[(&str, &str)]) -> String {
@@ -99,25 +147,15 @@ fn fixture_process_with_files(
     None
 }
 
-fn metadata(sha: &str) -> FactoryDefinitionSetup {
-    FactoryDefinitionSetup {
+fn metadata(sha: &str) -> FactoryDefinitionConfig {
+    FactoryDefinitionConfig {
         factory_id: cynic::Id::new("factory"),
         branch_id: cynic::Id::new("preview-one"),
         branch: "preview".into(),
-        source_fingerprint: "registered-source".into(),
         source_sha: sha.into(),
         repository_url: "https://fixture.invalid/definitions".into(),
         skill_dirs: vec!["skills".into()],
-        local: true,
     }
-}
-
-fn ready_client(metadata: FactoryDefinitionSetup) -> MockAIClient {
-    let mut client = MockAIClient::new();
-    client
-        .expect_get_factory_definition_setup()
-        .returning(move |_, _, _| Ok(Some(metadata.clone())));
-    client
 }
 
 async fn assert_skill_layout_activates(
@@ -130,16 +168,10 @@ async fn assert_skill_layout_activates(
     };
     let mut source = metadata(&fixture.second);
     source.skill_dirs = vec!["agents/reviewer/skills".into(), "skills".into()];
-    let definitions = prepare(
-        "layout",
-        None,
-        None,
-        &fixture.working,
-        &ready_client(source),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let definitions = prepare_from_config("layout", &fixture.working, Some(&source))
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(
         definitions
@@ -221,12 +253,12 @@ async fn factory_branch_native_git_preserves_concurrent_immutable_leaves() {
         .url()
         .unwrap()
         .to_owned();
-    let first = ready_client(metadata(&fixture.first));
-    let second = ready_client(metadata(&fixture.second));
+    let first = metadata(&fixture.first);
+    let second = metadata(&fixture.second);
     let (a, same_a, b) = futures::join!(
-        prepare("a", None, None, &fixture.working, &first),
-        prepare("same-a", None, None, &fixture.working, &first),
-        prepare("b", None, None, &fixture.working, &second),
+        prepare_from_config("a", &fixture.working, Some(&first)),
+        prepare_from_config("same-a", &fixture.working, Some(&first)),
+        prepare_from_config("b", &fixture.working, Some(&second)),
     );
     let a = a.unwrap().unwrap();
     let same_a = same_a.unwrap().unwrap();
@@ -316,12 +348,6 @@ async fn factory_branch_native_git_preserves_concurrent_immutable_leaves() {
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "example");
     assert_eq!(skills[0].description, "First revision");
-    remove_definition_skill_context(&mut input);
-    let super::super::agent::AIAgentContext::Skills { skills } = &input[0].context().unwrap()[0]
-    else {
-        panic!("missing skill context");
-    };
-    assert!(skills.is_empty());
     let spec = "example".parse().unwrap();
     assert_eq!(a.resolve_skill(&spec).unwrap().instructions, "Read A.");
     let selected_path = a.root.join("skills/example/SKILL.md");
@@ -329,187 +355,6 @@ async fn factory_branch_native_git_preserves_concurrent_immutable_leaves() {
     assert!(check_authored_skill_path(&selected_spec, &fixture.working, Some(&a)).is_ok());
     assert!(check_authored_skill_path(&selected_spec, &fixture.working, Some(&b)).is_err());
     assert!(check_authored_skill_path(&selected_spec, &fixture.working, None).is_err());
-
-    let session = DefinitionSession::loaded("a".into(), Some(a.clone()));
-    let unavailable = MockAIClient::new();
-    let retained = session
-        .prepare("a", None, &unavailable)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(retained.root, a.root);
-}
-
-#[tokio::test]
-async fn factory_branch_native_git_rebuilds_a_changed_activation_sha() {
-    let Some(fixture) =
-        fixture_process("factory_branch_native_git_rebuilds_a_changed_activation_sha")
-    else {
-        return;
-    };
-    let initial = metadata(&fixture.first);
-    let current = metadata(&fixture.second);
-    let mut client = MockAIClient::new();
-    client
-        .expect_get_factory_definition_setup()
-        .returning(move |_, input, _| match input.phase {
-            FactoryDefinitionSetupPhase::Metadata => Ok(Some(initial.clone())),
-            FactoryDefinitionSetupPhase::Materialize => {
-                if input.source_sha.as_deref() == Some(&initial.source_sha) {
-                    Ok(Some(initial.clone()))
-                } else {
-                    Ok(Some(current.clone()))
-                }
-            }
-            FactoryDefinitionSetupPhase::Activate => Ok(Some(current.clone())),
-        });
-    let definitions = prepare("moving", None, None, &fixture.working, &client)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(definitions.metadata.source_sha, fixture.second);
-    assert!(
-        std::fs::read_to_string(definitions.skill_dirs[0].join("example/SKILL.md"))
-            .unwrap()
-            .contains("Read B.")
-    );
-    let initial_leaves = fixture
-        .working
-        .join(".warp/factory-definitions/preview-one")
-        .join(&fixture.first);
-    assert_eq!(std::fs::read_dir(initial_leaves).unwrap().count(), 1);
-}
-
-#[tokio::test]
-async fn factory_branch_denied_activation_never_loads_downloaded_skills() {
-    let Some(fixture) =
-        fixture_process("factory_branch_denied_activation_never_loads_downloaded_skills")
-    else {
-        return;
-    };
-    let source = metadata(&fixture.first);
-    let mut client = MockAIClient::new();
-    client
-        .expect_get_factory_definition_setup()
-        .returning(move |_, input, _| match input.phase {
-            FactoryDefinitionSetupPhase::Metadata | FactoryDefinitionSetupPhase::Materialize => {
-                Ok(Some(source.clone()))
-            }
-            FactoryDefinitionSetupPhase::Activate => {
-                Err(anyhow::anyhow!("source permission revoked"))
-            }
-        });
-    let result = prepare("revoked", None, None, &fixture.working, &client).await;
-
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("source permission revoked")
-    );
-    assert_eq!(
-        Repository::open(&fixture.working)
-            .unwrap()
-            .head()
-            .unwrap()
-            .target()
-            .unwrap()
-            .to_string(),
-        fixture.second
-    );
-}
-
-#[tokio::test]
-async fn factory_branch_source_identity_changes_fail_before_git() {
-    let dir = tempfile::tempdir().unwrap();
-    let original = metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    let mut changed = original.clone();
-    changed.source_fingerprint = "replacement".into();
-    let mut client = MockAIClient::new();
-    client
-        .expect_get_factory_definition_setup()
-        .returning(move |_, input, _| match input.phase {
-            FactoryDefinitionSetupPhase::Metadata => Ok(Some(original.clone())),
-            FactoryDefinitionSetupPhase::Materialize | FactoryDefinitionSetupPhase::Activate => {
-                Ok(Some(changed.clone()))
-            }
-        });
-
-    assert!(
-        prepare("changed", None, None, dir.path(), &client)
-            .await
-            .is_err()
-    );
-    assert!(!dir.path().join(".warp").exists());
-}
-
-#[tokio::test]
-async fn factory_branch_materialization_stops_after_three_distinct_heads() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut client = MockAIClient::new();
-    client
-        .expect_get_factory_definition_setup()
-        .times(4)
-        .returning(|_, input, _| {
-            let next = match input.source_sha.as_deref() {
-                None => 'a',
-                Some(sha) if sha.starts_with('a') => 'b',
-                Some(sha) if sha.starts_with('b') => 'c',
-                Some(sha) if sha.starts_with('c') => 'd',
-                Some(sha) => panic!("unexpected head {sha}"),
-            };
-            assert_ne!(input.phase, FactoryDefinitionSetupPhase::Activate);
-            Ok(Some(metadata(&next.to_string().repeat(40))))
-        });
-
-    let error = prepare("moving", None, None, dir.path(), &client)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("head moved"));
-    assert!(!dir.path().join(".warp").exists());
-}
-
-#[tokio::test]
-async fn factory_branch_expired_metadata_cannot_materialize() {
-    let dir = tempfile::tempdir().unwrap();
-    let preparation = DefinitionPreparation {
-        metadata: Some(metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")),
-        deadline: Instant::now() - Duration::from_secs(1),
-    };
-    let client = MockAIClient::new();
-
-    assert!(
-        preparation
-            .activate("expired", None, None, dir.path(), &client)
-            .await
-            .is_err()
-    );
-    assert!(!dir.path().join(".warp").exists());
-}
-
-#[tokio::test]
-async fn factory_branch_production_does_not_materialize() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut client = MockAIClient::new();
-    client
-        .expect_get_factory_definition_setup()
-        .returning(|_, _, _| Ok(None));
-
-    assert!(
-        prepare("production", None, None, dir.path(), &client)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        DefinitionSession::default()
-            .prepare("production", None, &client)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(!dir.path().join(".warp").exists());
 }
 
 #[test]
@@ -578,7 +423,6 @@ fn factory_branch_absent_optional_roots_do_not_bypass_symlink_containment() {
             root: dunce::canonicalize(root.path()).unwrap(),
             skill_dirs: vec![root.path().join("agent/skills")],
             skills: Vec::new(),
-            setup_deadline: Instant::now() + SETUP_BUDGET,
         };
 
         assert!(
@@ -608,51 +452,12 @@ fn factory_branch_contained_directory_symlinks_remain_discoverable() {
         root: dunce::canonicalize(root.path()).unwrap(),
         skill_dirs: vec![root.path().join("skills-alias")],
         skills: Vec::new(),
-        setup_deadline: Instant::now() + SETUP_BUDGET,
     };
 
     validate_checkout(&definitions).unwrap();
     let skills = read_selected_skills(&definitions.skill_dirs).unwrap();
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "example");
-}
-
-#[tokio::test]
-async fn factory_branch_root_admission_requires_a_fresh_positive_production_result() {
-    use warp_graphql::queries::local_task_root_scope::LocalTaskRootScope;
-    let mut client = MockAIClient::new();
-    let mut sequence = mockall::Sequence::new();
-    client
-        .expect_get_local_task_root_scope()
-        .times(1)
-        .in_sequence(&mut sequence)
-        .returning(|| Ok(LocalTaskRootScope::Production));
-    client
-        .expect_get_local_task_root_scope()
-        .times(1)
-        .in_sequence(&mut sequence)
-        .returning(|| Ok(LocalTaskRootScope::Preview));
-    client
-        .expect_get_local_task_root_scope()
-        .times(1)
-        .in_sequence(&mut sequence)
-        .returning(|| Ok(LocalTaskRootScope::Unavailable));
-    client
-        .expect_get_local_task_root_scope()
-        .times(1)
-        .in_sequence(&mut sequence)
-        .returning(|| Err(anyhow::anyhow!("scope store unavailable")));
-
-    assert!(require_production_root(&client).await.is_ok());
-    assert!(require_production_root(&client).await.is_err());
-    assert!(require_production_root(&client).await.is_err());
-    assert!(
-        require_production_root(&client)
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("scope store unavailable")
-    );
 }
 
 #[test]

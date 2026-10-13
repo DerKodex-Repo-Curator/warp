@@ -3,6 +3,14 @@ schema {
   mutation: RootMutation
   subscription: RootSubscription
 }
+type FactoryDefinitionConfig {
+  factoryId: ID!
+  branchId: ID!
+  branch: String!
+  sourceSha: String!
+  repositoryUrl: String!
+  skillDirs: [String!]!
+}
 
 """
 Directs the executor to defer this fragment when the `if` argument is true or undefined.
@@ -3421,7 +3429,6 @@ type RootQuery {
   Returns all images with the 'dev-' prefix from the warpdotdev organization.
   """
   listWarpDevImages: ListWarpDevImagesResult!
-  localTaskRootScope: LocalTaskRootScope!
   managedSecrets(input: ManagedSecretsInput!, requestContext: RequestContext!): ManagedSecretsResult!
   pricingInfo(requestContext: RequestContext!): PricingInfoResult!
   rerankFragments(input: RerankFragmentsInput!, requestContext: RequestContext!): RerankFragmentsResult!
@@ -3873,8 +3880,7 @@ type Task {
   """
   Configuration for the active cloud execution. Requires the execution's workload token.
   """
-  executionConfig(executionId: ID!, supportsDeferredRepositories: Boolean = false): ExecutionConfiguration!
-  factoryDefinitionSetup(input: FactoryDefinitionSetupInput!): FactoryDefinitionSetup
+  executionConfig(executionId: ID, supportsDeferredRepositories: Boolean = false): ExecutionConfiguration!
 
   """The ID of the task."""
   taskId: ID!
@@ -3973,37 +3979,6 @@ type TaskOutput implements Response {
 }
 
 union TaskResult = TaskOutput | UserFacingError
-
-enum LocalTaskRootScope {
-  PRODUCTION
-  PREVIEW
-  UNAVAILABLE
-}
-
-enum FactoryDefinitionSetupPhase {
-  METADATA
-  MATERIALIZE
-  ACTIVATE
-}
-
-input FactoryDefinitionSetupInput {
-  phase: FactoryDefinitionSetupPhase!
-  executionId: ID
-  branchId: ID
-  sourceFingerprint: String
-  sourceSha: String
-}
-
-type FactoryDefinitionSetup {
-  factoryId: ID!
-  branchId: ID!
-  branch: String!
-  sourceFingerprint: String!
-  sourceSha: String!
-  repositoryUrl: String!
-  skillDirs: [String!]!
-  local: Boolean!
-}
 
 type TaskSecretEntry {
   name: String!
@@ -5262,6 +5237,7 @@ type ExecutionConfiguration {
   mcpServersJson: String!
   skills: [ExecutionSkillSpec!]!
   factorySkillDirs: [String!]!
+  factoryDefinitions: FactoryDefinitionConfig
   computerUseEnabled: Boolean!
   computerUseModelId: String
   inferenceProviders: InferenceProviderClientConfigs

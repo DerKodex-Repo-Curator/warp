@@ -36,7 +36,7 @@ use warpui::SingletonEntity;
 use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, ViewHandle};
 
 use crate::cloud_run::TuiCloudRunState;
-use crate::session_registry::{RemoteChildSession, TuiSessionId, TuiSessions};
+use crate::session_registry::{RemoteChildSession, TuiSessionId, TuiSessionView, TuiSessions};
 use crate::tab_bar::{TuiTabBarNavigationDirection, TuiTabBarPagingState};
 use crate::terminal_session_view::TuiTerminalSessionView;
 
@@ -786,6 +786,12 @@ impl TuiOrchestrationModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let request_team_scope = request.request_team_scope;
+        let factory_preview = TuiSessions::as_ref(ctx)
+            .session(parent_session_id)
+            .is_some_and(|session| match session.view() {
+                TuiSessionView::Terminal(view) => view.as_ref(ctx).has_factory_definitions(ctx),
+                TuiSessionView::Cloud(_) => false,
+            });
         let launch = prepare_local_oz_child_launch(
             &request.name,
             &request.prompt,
@@ -793,6 +799,7 @@ impl TuiOrchestrationModel {
             working_directory
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+            factory_preview,
             request_team_scope,
             ctx,
         );

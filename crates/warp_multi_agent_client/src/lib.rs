@@ -49,7 +49,6 @@ pub async fn generate_multi_agent_output(
     client: &BaseClient,
     request: &warp_multi_agent_api::Request,
     team_uid: Option<String>,
-    factory_definition_setup_ready: bool,
 ) -> Result<OutputStream, Error> {
     let auth_token = client
         .get_or_refresh_access_token()
@@ -76,12 +75,6 @@ pub async fn generate_multi_agent_output(
     }
     if let Some(team_uid) = team_uid {
         request_builder = request_builder.header(TEAM_UID_HEADER, team_uid);
-    }
-    if cfg!(not(target_family = "wasm")) && factory_definition_setup_ready {
-        request_builder = request_builder.header(
-            warp_graphql::queries::factory_definition_setup::CAPABILITY_HEADER,
-            "1",
-        );
     }
 
     let raw_stream = client.wrap_eventsource_with_iap_detection(request_builder.eventsource());

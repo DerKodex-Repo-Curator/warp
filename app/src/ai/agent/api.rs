@@ -141,12 +141,6 @@ pub struct RequestParams {
     pub forked_from_conversation_token: Option<ServerConversationToken>,
     pub ambient_agent_task_id: Option<AmbientAgentTaskId>,
     pub tasks: Vec<warp_multi_agent_api::Task>,
-    pub factory_definition_setup_ready: bool,
-    #[cfg(not(target_family = "wasm"))]
-    pub factory_definition_session: Option<(
-        crate::ai::factory_definitions::DefinitionSession,
-        warpui::ModelHandle<crate::ai::blocklist::ShellCommandExecutor>,
-    )>,
     pub existing_suggestions: Option<Suggestions>,
     pub metadata: Option<RequestMetadata>,
     pub session_context: SessionContext,
@@ -225,9 +219,6 @@ impl RequestParams {
             forked_from_conversation_token: None,
             ambient_agent_task_id: None,
             tasks: vec![],
-            factory_definition_setup_ready: false,
-            #[cfg(not(target_family = "wasm"))]
-            factory_definition_session: None,
             existing_suggestions: None,
             metadata: None,
             session_context: SessionContext::new_for_test(),
@@ -440,9 +431,6 @@ impl RequestParams {
             forked_from_conversation_token: conversation.forked_from_conversation_token,
             ambient_agent_task_id: conversation.ambient_agent_task_id,
             tasks: conversation.tasks,
-            factory_definition_setup_ready: false,
-            #[cfg(not(target_family = "wasm"))]
-            factory_definition_session: None,
             existing_suggestions: conversation.existing_suggestions,
             context_window_limit,
             metadata,

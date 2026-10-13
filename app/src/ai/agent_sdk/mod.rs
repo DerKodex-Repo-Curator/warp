@@ -881,7 +881,7 @@ impl AgentDriverRunner {
             setup_events
                 .post_timeline_event(OzRunTimelineEvent::WorkerContainerReady)
                 .await;
-            let execution_data = if FeatureFlag::CloudAgentExecutionConfig.is_enabled()
+            let execution_data = if (FeatureFlag::CloudAgentExecutionConfig.is_enabled() || std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty()))
                 && let (Some(task_id), Some(execution_id)) =
                     (args.task_id.as_deref(), args.execution_id.as_deref())
             {
@@ -1464,29 +1464,16 @@ impl AgentDriverRunner {
         }
         .map_err(AgentDriverError::ConfigBuildFailed)?;
 
-        if args.task_id.is_none() {
-            crate::ai::factory_definitions::require_production_root(server_api.as_ref())
-                .await
-                .map_err(AgentDriverError::ConfigBuildFailed)?;
+        let factory_preview =
+            std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty());
+        if factory_preview && args.task_id.is_none() {
+            return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
+                "Factory previews require a configured Factory task"
+            )));
         }
-        let preparation = if let Some(task_id_str) = args.task_id.as_deref() {
-            Some(
-                crate::ai::factory_definitions::DefinitionPreparation::load(
-                    task_id_str,
-                    args.execution_id.as_deref(),
-                    server_api.as_ref(),
-                )
-                .await
-                .map_err(AgentDriverError::ConfigBuildFailed)?,
-            )
-        } else {
-            None
-        };
-        let is_local_preview = preparation
-            .as_ref()
-            .is_some_and(|preparation| preparation.is_local_preview());
+        let factory_descendant = factory_preview && execution_data.is_none();
         if let Some(task_id_str) = args.task_id.as_ref()
-            && !is_local_preview
+            && !factory_descendant
         {
             Self::bootstrap_git_credentials_for_task(
                 foreground,
@@ -1506,21 +1493,21 @@ impl AgentDriverRunner {
             attachments,
         }) = execution_data
         {
-            let definitions = preparation
-                .context("Missing execution definition preparation")
-                .map_err(AgentDriverError::ConfigBuildFailed)?
-                .activate(
-                    args.task_id
-                        .as_deref()
-                        .context("Missing execution task ID")
-                        .map_err(AgentDriverError::ConfigBuildFailed)?,
-                    args.execution_id.as_deref(),
-                    config.parent_run_id.as_ref().map(cynic::Id::inner),
-                    &working_dir,
-                    server_api.as_ref(),
-                )
-                .await
-                .map_err(AgentDriverError::ConfigBuildFailed)?;
+            if factory_preview && config.factory_definitions.is_none() {
+                return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
+                    "Factory execution configuration has no selected definitions"
+                )));
+            }
+            let definitions = crate::ai::factory_definitions::prepare_from_config(
+                args.task_id
+                    .as_deref()
+                    .context("Missing execution task ID")
+                    .map_err(AgentDriverError::ConfigBuildFailed)?,
+                &working_dir,
+                config.factory_definitions.as_ref(),
+            )
+            .await
+            .map_err(AgentDriverError::ConfigBuildFailed)?;
             let (first_skill, skill_discovery_dirs) = Self::resolve_execution_skills(
                 foreground,
                 &args,
@@ -1586,18 +1573,20 @@ impl AgentDriverRunner {
             }
             return Ok((options, task, conversation_id));
         }
-        let mut definitions = match preparation {
-            Some(preparation) => preparation
-                .activate(
-                    args.task_id.as_deref().expect("prepared task ID"),
-                    None,
-                    None,
-                    &working_dir,
-                    server_api.as_ref(),
-                )
-                .await
-                .map_err(AgentDriverError::ConfigBuildFailed)?,
-            None => None,
+        let definitions = if factory_descendant {
+            crate::ai::factory_definitions::prepare_child(
+                args.task_id
+                    .as_deref()
+                    .context("Missing Factory child task ID")
+                    .map_err(AgentDriverError::ConfigBuildFailed)?,
+                &working_dir,
+                true,
+                server_api.as_ref(),
+            )
+            .await
+            .map_err(AgentDriverError::ConfigBuildFailed)?
+        } else {
+            None
         };
         // Resolve the skill, if we have one
         let resolved_skill = Self::resolve_skill(
@@ -1692,11 +1681,10 @@ impl AgentDriverRunner {
         // Handle secrets/attachments fetch (existing task) or task creation (new run).
         // The existing-task branch also surfaces the task's `conversation_id` (if any) so
         // the caller can wire up resume without a separate `--conversation` arg.
-        let is_new_task = task_id_str.is_none();
         let (task_conversation_id, additional_source_repos) = if let Some(task_id_str) = task_id_str
         {
             driver_options.team_scope = agent_driver_team_scope;
-            if is_local_preview {
+            if factory_descendant {
                 let task_id = driver_options
                     .task_id
                     .ok_or(AgentDriverError::InvalidRuntimeState)?;
@@ -1763,25 +1751,9 @@ impl AgentDriverRunner {
             .await?;
             (None, Vec::new())
         };
-        if definitions.is_none()
-            && let Some(task_id) = driver_options.task_id
-            && is_new_task
-        {
-            definitions = crate::ai::factory_definitions::prepare(
-                &task_id.to_string(),
-                None,
-                driver_options.parent_run_id.as_deref(),
-                &driver_options.working_dir,
-                server_api.as_ref(),
-            )
-            .await
-            .map_err(AgentDriverError::ConfigBuildFailed)?;
-        }
-        if let Some(definitions) = definitions.as_ref()
-            && definitions.metadata.local
-        {
+        if let Some(definitions) = definitions {
             driver_options.workspace.factory_skill_dirs = Some(definitions.skill_dirs.clone());
-            driver_options.workspace.factory_definitions = Some(definitions.clone());
+            driver_options.workspace.factory_definitions = Some(definitions);
             return Ok((driver_options, task, task_conversation_id));
         }
         // Resolve environment and cloud providers.
@@ -1798,10 +1770,6 @@ impl AgentDriverRunner {
             remove_repository_origins,
         )?;
 
-        if let Some(definitions) = definitions {
-            driver_options.workspace.factory_skill_dirs = Some(definitions.skill_dirs.clone());
-            driver_options.workspace.factory_definitions = Some(definitions);
-        }
         Ok((driver_options, task, task_conversation_id))
     }
 
@@ -1828,16 +1796,25 @@ impl AgentDriverRunner {
             Some(config)
         };
 
-        let task_id = server_api
+        let task_id = match server_api
             .create_agent_task(prompt, environment, None, task_config, request_team_scope)
             .await
             .context("Failed to create task")
-            .map_err(AgentDriverError::ConfigBuildFailed)?;
-        log::info!("Created task: {task_id}");
+        {
+            Ok(id) => {
+                log::info!("Created task: {id}");
+                Some(id)
+            }
+            Err(e) => {
+                report_error!(e);
+                // Continue without a task_id rather than failing entirely
+                None
+            }
+        };
 
         // Set the task ID on the ServerApi so it's sent with all subsequent requests.
-        Self::set_ambient_agent_task_id(foreground, Some(task_id)).await?;
-        driver_options.task_id = Some(task_id);
+        Self::set_ambient_agent_task_id(foreground, task_id).await?;
+        driver_options.task_id = task_id;
 
         Ok(())
     }

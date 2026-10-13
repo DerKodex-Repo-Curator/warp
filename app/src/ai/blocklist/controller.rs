@@ -357,7 +357,7 @@ pub struct BlocklistAIController {
     /// sessions within it. In the future, one task may span several sessions with background processes.
     ambient_agent_task_id: Option<AmbientAgentTaskId>,
     #[cfg(not(target_family = "wasm"))]
-    factory_definition_session: crate::ai::factory_definitions::DefinitionSession,
+    factory_definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
 
     /// Per-session directory for downloading file attachments.
     /// Set by the agent driver based on the workspace directory (e.g. `{working_dir}/.warp/attachments`).
@@ -725,7 +725,7 @@ impl BlocklistAIController {
             external_harness_prompt_sink: None,
             ambient_agent_task_id: None,
             #[cfg(not(target_family = "wasm"))]
-            factory_definition_session: Default::default(),
+            factory_definitions: None,
             attachments_download_dir: None,
             pending_auto_resume_handles: HashMap::new(),
             pending_local_claude_wakes: HashMap::new(),
@@ -2915,11 +2915,22 @@ impl BlocklistAIController {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn set_factory_definition_session(
+    pub fn has_factory_definitions(&self) -> bool {
+        self.factory_definitions.is_some()
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn set_factory_definitions(
         &mut self,
-        session: crate::ai::factory_definitions::DefinitionSession,
+        definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
+        ctx: &mut ModelContext<Self>,
     ) {
-        self.factory_definition_session = session;
+        if let Some(definitions) = &definitions {
+            crate::ai::skills::SkillManager::handle(ctx).update(ctx, |manager, _| {
+                manager.cache_definition_skills(definitions.skills.clone());
+            });
+        }
+        self.factory_definitions = definitions;
     }
 
     /// Set the per-session directory for downloading file attachments.
@@ -2981,7 +2992,6 @@ impl BlocklistAIController {
             parent_agent_id,
             agent_name,
             use_warp_credits_instead_of_chatgpt,
-            ambient_agent_task_id,
         ) = {
             let Some(conversation) = history_model
                 .as_ref(ctx)
@@ -3005,7 +3015,6 @@ impl BlocklistAIController {
                 conversation.parent_agent_id().map(str::to_string),
                 conversation.agent_name().map(str::to_string),
                 conversation.use_warp_credits_instead_of_chatgpt(),
-                conversation.task_id().or(self.ambient_agent_task_id),
             )
         };
 
@@ -3059,7 +3068,7 @@ impl BlocklistAIController {
             tasks: active_tasks,
             server_conversation_token: conversation_server_token,
             forked_from_conversation_token: conversation_forked_from_token,
-            ambient_agent_task_id,
+            ambient_agent_task_id: self.ambient_agent_task_id,
             existing_suggestions: history_model
                 .as_ref(ctx)
                 .existing_suggestions_for_conversation(conversation_id)
@@ -3103,11 +3112,8 @@ impl BlocklistAIController {
         request_params.parent_agent_id = parent_agent_id;
         request_params.agent_name = agent_name;
         #[cfg(not(target_family = "wasm"))]
-        {
-            request_params.factory_definition_session = Some((
-                self.factory_definition_session.clone(),
-                self.action_model.as_ref(ctx).shell_command_executor(ctx),
-            ));
+        if let Some(definitions) = &self.factory_definitions {
+            definitions.add_skill_context(&mut request_params.input);
         }
 
         let server_conversation_token_for_identifiers =

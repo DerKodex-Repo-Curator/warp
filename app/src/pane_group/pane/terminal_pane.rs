@@ -1692,11 +1692,20 @@ fn launch_local_no_harness_child(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
+    let factory_preview = group
+        .terminal_view_from_pane_id(parent_pane_id, ctx)
+        .is_some_and(|view| {
+            view.as_ref(ctx)
+                .ai_controller()
+                .as_ref(ctx)
+                .has_factory_definitions()
+        });
     let launch = prepare_local_oz_child_launch(
         &request.name,
         &request.prompt,
         request.parent_run_id.as_deref(),
         working_dir,
+        factory_preview,
         request_team_scope,
         ctx,
     );
@@ -1751,12 +1760,8 @@ fn launch_local_no_harness_child(
                         terminal_view
                             .ai_controller()
                             .update(ctx, |controller, ctx| {
-                                controller.set_factory_definition_session(
-                                    crate::ai::factory_definitions::DefinitionSession::loaded(
-                                        child_task_id.to_string(),
-                                        prepared.definitions.clone(),
-                                    ),
-                                );
+                                controller
+                                    .set_factory_definitions(prepared.definitions.clone(), ctx);
                                 controller.send_agent_query_in_conversation(
                                     prompt.clone(),
                                     conversation_id,
@@ -1841,6 +1846,14 @@ fn launch_local_harness_child(
         .terminal_view_from_pane_id(parent_pane_id, ctx)
         .and_then(|view| host_terminal_shared_session_source_type(&view, ctx));
 
+    let factory_preview = group
+        .terminal_view_from_pane_id(parent_pane_id, ctx)
+        .is_some_and(|view| {
+            view.as_ref(ctx)
+                .ai_controller()
+                .as_ref(ctx)
+                .has_factory_definitions()
+        });
     let model_id_for_harness_env = model_id.clone();
     let agent_name_for_task = agent_name.clone();
     let request_team_scope = request.request_team_scope;
@@ -1854,6 +1867,7 @@ fn launch_local_harness_child(
                 agent_name_for_task,
                 shell_type,
                 startup_directory,
+                factory_preview,
                 ai_client,
                 request_team_scope,
             )

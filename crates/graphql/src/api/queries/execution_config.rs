@@ -4,6 +4,57 @@ use crate::ai::AgentHarness;
 use crate::error::UserFacingError;
 use crate::request_context::RequestContext;
 use crate::schema;
+#[derive(cynic::QueryVariables, Debug)]
+pub struct FactoryExecutionConfigVariables {
+    pub task_input: TaskInput,
+    pub request_context: RequestContext,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(
+    graphql_type = "RootQuery",
+    variables = "FactoryExecutionConfigVariables"
+)]
+pub struct FactoryExecutionConfig {
+    #[arguments(input: $task_input, requestContext: $request_context)]
+    pub task: FactoryExecutionTaskResult,
+}
+crate::client::define_operation! {
+    factory_execution_config(FactoryExecutionConfigVariables) -> FactoryExecutionConfig;
+}
+
+#[derive(cynic::InlineFragments, Debug)]
+#[cynic(
+    graphql_type = "TaskResult",
+    variables = "FactoryExecutionConfigVariables"
+)]
+pub enum FactoryExecutionTaskResult {
+    TaskOutput(FactoryExecutionTaskOutput),
+    UserFacingError(UserFacingError),
+    #[cynic(fallback)]
+    Unknown,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(
+    graphql_type = "TaskOutput",
+    variables = "FactoryExecutionConfigVariables"
+)]
+pub struct FactoryExecutionTaskOutput {
+    pub task: FactoryExecutionTask,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "Task")]
+pub struct FactoryExecutionTask {
+    pub execution_config: FactoryExecutionDefinitions,
+}
+
+#[derive(cynic::QueryFragment, Debug)]
+#[cynic(graphql_type = "ExecutionConfiguration")]
+pub struct FactoryExecutionDefinitions {
+    pub factory_definitions: Option<FactoryDefinitionConfig>,
+}
 
 #[derive(cynic::QueryVariables, Debug)]
 pub struct ExecutionBootstrapVariables {
@@ -12,6 +63,15 @@ pub struct ExecutionBootstrapVariables {
     pub secrets_input: TaskSecretsInput,
     pub task_input: TaskInput,
     pub request_context: RequestContext,
+}
+#[derive(cynic::QueryFragment, Clone, Debug)]
+pub struct FactoryDefinitionConfig {
+    pub factory_id: cynic::Id,
+    pub branch_id: cynic::Id,
+    pub branch: String,
+    pub source_sha: String,
+    pub repository_url: String,
+    pub skill_dirs: Vec<String>,
 }
 
 #[derive(cynic::QueryFragment, Debug)]
@@ -64,6 +124,7 @@ pub struct ExecutionConfiguration {
     pub mcp_servers_json: String,
     pub skills: Vec<ExecutionSkillSpec>,
     pub factory_skill_dirs: Vec<String>,
+    pub factory_definitions: Option<FactoryDefinitionConfig>,
     pub computer_use_enabled: bool,
     pub computer_use_model_id: Option<String>,
     pub inference_providers: Option<InferenceProviderClientConfigs>,

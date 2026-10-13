@@ -2407,6 +2407,10 @@ impl TuiTerminalSessionView {
         self.cli_agent_osc_event_publisher = Some(publisher);
     }
 
+    pub(crate) fn has_factory_definitions(&self, ctx: &AppContext) -> bool {
+        self.ai_controller.as_ref(ctx).has_factory_definitions()
+    }
+
     /// Starts the first request for a child conversation hosted by this
     /// background session.
     pub(crate) fn start_orchestrated_child(
@@ -2419,10 +2423,7 @@ impl TuiTerminalSessionView {
     ) {
         self.ai_controller.update(ctx, |controller, ctx| {
             controller.set_ambient_agent_task_id(Some(task_id), ctx);
-            controller.set_factory_definition_session(warp::tui_export::DefinitionSession::loaded(
-                task_id.to_string(),
-                definitions,
-            ));
+            controller.set_factory_definitions(definitions, ctx);
             controller.send_agent_query_in_conversation(prompt, conversation_id, ctx);
         });
     }
@@ -5145,23 +5146,6 @@ impl TuiTerminalSessionView {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
-            ShellCommandExecutorEvent::PrepareFactoryEnvironment { block_id, command } => {
-                let Some(session_id) = model.lock().block_list().active_block().session_id() else {
-                    return;
-                };
-                ctx.emit(TuiTerminalSessionEvent::ExecuteCommand(Box::new(
-                    ExecuteCommandEvent {
-                        command: command.clone(),
-                        session_id,
-                        workflow_id: None,
-                        workflow_command: None,
-                        should_add_command_to_history: false,
-                        source: CommandExecutionSource::FactoryDefinitionSetup {
-                            block_id: block_id.clone(),
-                        },
-                    },
-                )));
-            }
             ShellCommandExecutorEvent::ExecuteCommand { action_id, command } => {
                 let Some((session_id, conversation_id)) = (|| {
                     let model = model.lock();

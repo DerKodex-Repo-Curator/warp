@@ -35,6 +35,7 @@ pub fn prepare_local_oz_child_launch(
     prompt: &str,
     parent_run_id: Option<&str>,
     working_dir: std::path::PathBuf,
+    factory_preview: bool,
     team_scope: RequestTeamScope,
     ctx: &AppContext,
 ) -> impl Future<Output = anyhow::Result<PreparedLocalOzChildLaunch>> + 'static + use<> {
@@ -56,11 +57,10 @@ pub fn prepare_local_oz_child_launch(
                 team_scope,
             )
             .await?;
-        let definitions = crate::ai::factory_definitions::prepare(
+        let definitions = crate::ai::factory_definitions::prepare_child(
             &task_id.to_string(),
-            None,
-            parent_run_id.as_deref(),
             &working_dir,
+            factory_preview,
             ai_client.as_ref(),
         )
         .await?;
