@@ -1797,7 +1797,14 @@ impl AgentDriverRunner {
         };
 
         let task_id = match server_api
-            .create_agent_task(prompt, environment, None, task_config, request_team_scope)
+            .create_agent_task(
+                prompt,
+                environment,
+                None,
+                task_config,
+                HashMap::new(),
+                request_team_scope,
+            )
             .await
             .context("Failed to create task")
         {

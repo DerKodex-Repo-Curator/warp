@@ -3851,6 +3851,7 @@ fn cloud_mode_dispatched_agent_inserts_queued_user_query() {
                 .update(ctx, |model, ctx| {
                     model.spawn_agent_with_request(
                         SpawnAgentRequest {
+                            metadata: Default::default(),
                             prompt: Some("write the tests".to_string()),
                             mode: UserQueryMode::Normal,
                             config: None,
@@ -8613,6 +8614,34 @@ fn submit_cli_agent_rich_input_opencode_defers_enter_and_close() {
             "carriage return should be written after delay"
         );
         assert_eq!(pty_writes.borrow()[1], b"\r");
+    })
+}
+
+#[test]
+fn submit_cli_agent_rich_input_muse_uses_bracketed_paste() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let _agent_view = FeatureFlag::AgentView.override_enabled(true);
+        let _cli_rich = FeatureFlag::CLIAgentRichInput.override_enabled(true);
+
+        let (_terminal, pty_writes) =
+            submit_rich_input_and_collect_pty_writes(&mut app, CLIAgent::Muse, "hello");
+
+        let writes = pty_writes.borrow();
+        assert_eq!(
+            writes.len(),
+            2,
+            "expected 2 PTY writes, got {}",
+            writes.len()
+        );
+
+        let mut expected_paste =
+            Vec::with_capacity(BRACKETED_PASTE_START.len() + 5 + BRACKETED_PASTE_END.len());
+        expected_paste.extend_from_slice(BRACKETED_PASTE_START);
+        expected_paste.extend_from_slice(b"hello");
+        expected_paste.extend_from_slice(BRACKETED_PASTE_END);
+        assert_eq!(writes[0], expected_paste);
+        assert_eq!(writes[1], b"\r");
     })
 }
 

@@ -1256,7 +1256,16 @@ async fn execute_checkout_helper(
     remove_origins_only: bool,
     spawner: &ModelSpawner<TerminalDriver>,
 ) -> Result<CheckoutHelperResult, PrepareEnvironmentError> {
-    let directory = tempfile::tempdir().map_err(|_| PrepareEnvironmentError::CheckoutHelper {
+    #[cfg(unix)]
+    let directory = {
+        use std::os::unix::fs::PermissionsExt as _;
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+    };
+    #[cfg(not(unix))]
+    let directory = tempfile::tempdir();
+    let directory = directory.map_err(|_| PrepareEnvironmentError::CheckoutHelper {
         reason: "could not create private checkout request directory",
     })?;
     let requests_file = directory.path().join("requests.json");
@@ -1267,6 +1276,8 @@ async fn execute_checkout_helper(
     std::fs::write(&requests_file, bytes).map_err(|_| PrepareEnvironmentError::CheckoutHelper {
         reason: "could not write checkout requests",
     })?;
+    #[cfg(not(target_family = "wasm"))]
+    let _tracing_handoff = crate::tracing::create_child_process_handoff(&requests_file);
     let executable =
         std::env::current_exe().map_err(|_| PrepareEnvironmentError::CheckoutHelper {
             reason: "could not resolve the running Warp/Oz executable",

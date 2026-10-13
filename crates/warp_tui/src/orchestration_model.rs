@@ -800,6 +800,7 @@ impl TuiOrchestrationModel {
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
             factory_preview,
+            &request.metadata,
             request_team_scope,
             ctx,
         );

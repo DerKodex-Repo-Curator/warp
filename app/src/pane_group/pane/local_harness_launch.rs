@@ -162,6 +162,7 @@ pub(super) async fn prepare_local_harness_child_launch(
     model_id: Option<String>,
     parent_run_id: Option<String>,
     agent_name: Option<String>,
+    metadata: HashMap<String, String>,
     shell_type: Option<ShellType>,
     startup_directory: Option<PathBuf>,
     factory_preview: bool,
@@ -212,6 +213,7 @@ pub(super) async fn prepare_local_harness_child_launch(
             None,
             parent_run_id.clone(),
             local_child_task_config(harness, agent_name),
+            metadata,
             team_scope,
         )
         .await
