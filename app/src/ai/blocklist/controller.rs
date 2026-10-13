@@ -2915,8 +2915,10 @@ impl BlocklistAIController {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn has_factory_definitions(&self) -> bool {
-        self.factory_definitions.is_some()
+    pub fn factory_execution_id(&self) -> Option<&str> {
+        self.factory_definitions
+            .as_ref()
+            .map(|definitions| definitions.execution_id.as_str())
     }
 
     #[cfg(not(target_family = "wasm"))]

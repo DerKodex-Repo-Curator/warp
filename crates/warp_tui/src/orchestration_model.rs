@@ -786,11 +786,11 @@ impl TuiOrchestrationModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let request_team_scope = request.request_team_scope;
-        let factory_preview = TuiSessions::as_ref(ctx)
+        let factory_execution_id = TuiSessions::as_ref(ctx)
             .session(parent_session_id)
-            .is_some_and(|session| match session.view() {
-                TuiSessionView::Terminal(view) => view.as_ref(ctx).has_factory_definitions(ctx),
-                TuiSessionView::Cloud(_) => false,
+            .and_then(|session| match session.view() {
+                TuiSessionView::Terminal(view) => view.as_ref(ctx).factory_execution_id(ctx),
+                TuiSessionView::Cloud(_) => None,
             });
         let launch = prepare_local_oz_child_launch(
             &request.name,
@@ -799,7 +799,7 @@ impl TuiOrchestrationModel {
             working_directory
                 .clone()
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-            factory_preview,
+            factory_execution_id,
             &request.metadata,
             request_team_scope,
             ctx,

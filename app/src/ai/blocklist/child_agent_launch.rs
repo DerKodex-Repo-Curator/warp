@@ -38,7 +38,7 @@ pub fn prepare_local_oz_child_launch(
     prompt: &str,
     parent_run_id: Option<&str>,
     working_dir: std::path::PathBuf,
-    factory_preview: bool,
+    factory_execution_id: Option<String>,
     metadata: &HashMap<String, String>,
     team_scope: RequestTeamScope,
     ctx: &AppContext,
@@ -66,7 +66,7 @@ pub fn prepare_local_oz_child_launch(
         let definitions = crate::ai::factory_definitions::prepare_child(
             &task_id.to_string(),
             &working_dir,
-            factory_preview,
+            factory_execution_id.as_deref(),
             ai_client.as_ref(),
         )
         .await?;

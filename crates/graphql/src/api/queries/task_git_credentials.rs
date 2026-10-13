@@ -46,7 +46,6 @@ pub enum TaskGitCredentialsResult {
 pub struct TaskGitCredentialsOutput {
     pub credentials: Vec<TaskGitCredential>,
     pub failed_hosts: Vec<String>,
-    pub definition_credential: Option<TaskGitCredential>,
 }
 
 /// Pre-#16215 operation: omits `acceptsPartialRefresh` and `failedHosts` so a

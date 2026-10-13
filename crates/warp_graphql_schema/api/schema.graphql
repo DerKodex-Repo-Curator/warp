@@ -3,13 +3,12 @@ schema {
   mutation: RootMutation
   subscription: RootSubscription
 }
-type FactoryDefinitionConfig {
+type FactoryBranchExecutionConfig {
   factoryId: ID!
   branchId: ID!
   branch: String!
   sourceSha: String!
   repositoryUrl: String!
-  skillDirs: [String!]!
 }
 
 """
@@ -3883,7 +3882,7 @@ type Task {
   """
   Configuration for the active cloud execution. Requires the execution's workload token.
   """
-  executionConfig(executionId: ID, supportsDeferredRepositories: Boolean = false): ExecutionConfiguration!
+  executionConfig(executionId: ID!, supportsDeferredRepositories: Boolean = false): ExecutionConfiguration!
 
   """The ID of the task."""
   taskId: ID!
@@ -3952,7 +3951,6 @@ input TaskGitCredentialsInput {
 type TaskGitCredentialsOutput implements Response {
   """The credentials that were freshly issued this cycle, one per host."""
   credentials: [TaskGitCredential!]!
-  definitionCredential: TaskGitCredential
 
   """
   Hosts whose credential could not be issued this cycle because of a
@@ -5240,7 +5238,7 @@ type ExecutionConfiguration {
   mcpServersJson: String!
   skills: [ExecutionSkillSpec!]!
   factorySkillDirs: [String!]!
-  factoryDefinitions: FactoryDefinitionConfig
+  factoryBranch: FactoryBranchExecutionConfig
   computerUseEnabled: Boolean!
   computerUseModelId: String
   inferenceProviders: InferenceProviderClientConfigs

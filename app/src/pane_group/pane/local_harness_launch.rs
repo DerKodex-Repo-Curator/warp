@@ -165,7 +165,7 @@ pub(super) async fn prepare_local_harness_child_launch(
     metadata: HashMap<String, String>,
     shell_type: Option<ShellType>,
     startup_directory: Option<PathBuf>,
-    factory_preview: bool,
+    factory_execution_id: Option<String>,
     ai_client: Arc<dyn AIClient>,
     team_scope: RequestTeamScope,
 ) -> Result<PreparedLocalHarnessLaunch, String> {
@@ -221,7 +221,7 @@ pub(super) async fn prepare_local_harness_child_launch(
     let definitions = crate::ai::factory_definitions::prepare_child(
         &task_id.to_string(),
         &working_dir,
-        factory_preview,
+        factory_execution_id.as_deref(),
         ai_client.as_ref(),
     )
     .await

@@ -9,7 +9,7 @@ use git2::{Repository, Signature};
 use tempfile::TempDir;
 use warp_cli::agent::Harness;
 use warp_core::features::FeatureFlag;
-use warp_graphql::queries::execution_config::FactoryDefinitionConfig;
+use warp_graphql::queries::execution_config::FactoryBranchExecutionConfig;
 
 use super::{
     build_local_claude_child_command, build_local_codex_child_command,
@@ -149,18 +149,27 @@ async fn factory_branch_local_native_children_publish_activated_skills_without_g
             .returning(|_, _, _, _, _, _| {
                 Ok("550e8400-e29b-41d4-a716-446655440000".parse().unwrap())
             });
-        let metadata = FactoryDefinitionConfig {
+        let metadata = FactoryBranchExecutionConfig {
             factory_id: cynic::Id::new("factory"),
             branch_id: cynic::Id::new("preview"),
             branch: "preview".into(),
             source_sha: head.to_string(),
             repository_url: "https://fixture.invalid/definitions".into(),
-            skill_dirs: vec!["skills".into()],
         };
         client
             .expect_get_factory_definition_config()
             .times(1)
-            .returning(move |_| Ok(Some(metadata.clone())));
+            .withf(|_, execution_id| execution_id == "42")
+            .returning(move |_, _| {
+                Ok(
+                    warp_graphql::queries::execution_config::FactoryExecutionDefinitions {
+                        execution_id: cynic::Id::new("42"),
+                        parent_run_id: Some(cynic::Id::new("parent")),
+                        factory_branch: Some(metadata.clone()),
+                        factory_skill_dirs: vec!["skills".into()],
+                    },
+                )
+            });
 
         let prepared = prepare_local_harness_child_launch(
             "Read the example skill".into(),
@@ -171,13 +180,17 @@ async fn factory_branch_local_native_children_publish_activated_skills_without_g
             HashMap::from([("role".into(), "implementation".into())]),
             Some(ShellType::Bash),
             Some(working_dir.clone()),
-            true,
+            Some("42".into()),
             Arc::new(client),
             teamless_request_scope(),
         )
         .await
         .unwrap();
 
+        assert_eq!(
+            prepared.env_vars.get(&OsString::from("WARP_EXECUTION_ID")),
+            Some(&OsString::from("42"))
+        );
         let selected = PathBuf::from(
             prepared
                 .env_vars
@@ -421,7 +434,7 @@ async fn prepare_local_codex_child_launch_rejects_without_rewriting_global_codex
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        false,
+        None,
         Arc::new(ai_client),
         teamless_request_scope(),
     )
@@ -462,7 +475,7 @@ async fn prepare_local_codex_child_launch_succeeds_when_testing_flag_is_enabled(
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        false,
+        None,
         Arc::new(ai_client),
         teamless_request_scope(),
     )
@@ -515,7 +528,7 @@ async fn prepare_local_claude_child_propagates_scope_and_merges_model_env_var() 
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        false,
+        None,
         Arc::new(ai_client),
         RequestTeamScope::from_scope(&TeamContextForOperation::new_for_test(team_uid)),
     )
@@ -575,7 +588,7 @@ async fn prepare_local_claude_child_no_anthropic_model_when_empty() {
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        false,
+        None,
         Arc::new(ai_client),
         teamless_request_scope(),
     )
@@ -601,7 +614,7 @@ async fn prepare_local_harness_child_launch_rejects_disabled_codex_before_shell_
         HashMap::new(),
         None,
         None,
-        false,
+        None,
         ai_client,
         teamless_request_scope(),
     )

@@ -16,11 +16,20 @@ async fn factory_branch_child_requires_selected_execution_config() {
     let mut client = crate::server::server_api::ai::MockAIClient::new();
     client
         .expect_get_factory_definition_config()
-        .withf(|task_id| task_id == "child")
+        .withf(|task_id, execution_id| task_id == "child" && execution_id == "42")
         .times(1)
-        .returning(|_| Ok(None));
+        .returning(|_, _| {
+            Ok(
+                warp_graphql::queries::execution_config::FactoryExecutionDefinitions {
+                    execution_id: cynic::Id::new("42"),
+                    parent_run_id: Some(cynic::Id::new("parent")),
+                    factory_branch: None,
+                    factory_skill_dirs: Vec::new(),
+                },
+            )
+        });
     assert!(
-        prepare_child("child", root.path(), true, &client)
+        prepare_child("child", root.path(), Some("42"), &client)
             .await
             .is_err()
     );
@@ -33,16 +42,15 @@ async fn factory_branch_execution_config_missing_commit_fails_without_fallback()
     else {
         return;
     };
-    let config = warp_graphql::queries::execution_config::FactoryDefinitionConfig {
+    let config = warp_graphql::queries::execution_config::FactoryBranchExecutionConfig {
         factory_id: cynic::Id::new("factory"),
         branch_id: cynic::Id::new("preview-one"),
         branch: "preview".into(),
         source_sha: "0".repeat(40),
         repository_url: "https://fixture.invalid/definitions".into(),
-        skill_dirs: vec!["skills".into()],
     };
     assert!(
-        prepare_from_config("missing", &fixture.working, Some(&config))
+        prepare_from_config(&fixture.working, "42", Some(&config), &["skills".into()])
             .await
             .is_err()
     );
@@ -147,14 +155,13 @@ fn fixture_process_with_files(
     None
 }
 
-fn metadata(sha: &str) -> FactoryDefinitionConfig {
-    FactoryDefinitionConfig {
+fn metadata(sha: &str) -> FactoryBranchExecutionConfig {
+    FactoryBranchExecutionConfig {
         factory_id: cynic::Id::new("factory"),
         branch_id: cynic::Id::new("preview-one"),
         branch: "preview".into(),
         source_sha: sha.into(),
         repository_url: "https://fixture.invalid/definitions".into(),
-        skill_dirs: vec!["skills".into()],
     }
 }
 
@@ -166,12 +173,16 @@ async fn assert_skill_layout_activates(
     let Some(fixture) = fixture_process_with_files(test, files, files) else {
         return;
     };
-    let mut source = metadata(&fixture.second);
-    source.skill_dirs = vec!["agents/reviewer/skills".into(), "skills".into()];
-    let definitions = prepare_from_config("layout", &fixture.working, Some(&source))
-        .await
-        .unwrap()
-        .unwrap();
+    let source = metadata(&fixture.second);
+    let definitions = prepare_from_config(
+        &fixture.working,
+        "42",
+        Some(&source),
+        &["agents/reviewer/skills".into(), "skills".into()],
+    )
+    .await
+    .unwrap()
+    .unwrap();
 
     assert_eq!(
         definitions
@@ -255,10 +266,11 @@ async fn factory_branch_native_git_preserves_concurrent_immutable_leaves() {
         .to_owned();
     let first = metadata(&fixture.first);
     let second = metadata(&fixture.second);
+    let skill_dirs = ["skills".into()];
     let (a, same_a, b) = futures::join!(
-        prepare_from_config("a", &fixture.working, Some(&first)),
-        prepare_from_config("same-a", &fixture.working, Some(&first)),
-        prepare_from_config("b", &fixture.working, Some(&second)),
+        prepare_from_config(&fixture.working, "42", Some(&first), &skill_dirs),
+        prepare_from_config(&fixture.working, "42", Some(&first), &skill_dirs),
+        prepare_from_config(&fixture.working, "42", Some(&second), &skill_dirs),
     );
     let a = a.unwrap().unwrap();
     let same_a = same_a.unwrap().unwrap();
@@ -317,6 +329,10 @@ async fn factory_branch_native_git_preserves_concurrent_immutable_leaves() {
             .working
             .join(".warp/factory-definitions/current")
             .exists()
+    );
+    assert_eq!(
+        a.env_vars().get(&OsString::from("WARP_EXECUTION_ID")),
+        Some(&OsString::from("42"))
     );
     assert_eq!(
         a.env_vars().get(&OsString::from("WARP_FACTORY_CONFIG_SHA")),
@@ -419,6 +435,7 @@ fn factory_branch_absent_optional_roots_do_not_bypass_symlink_containment() {
         let root = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(target, root.path().join("agent")).unwrap();
         let definitions = ActivatedDefinitions {
+            execution_id: "42".into(),
             metadata: metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             root: dunce::canonicalize(root.path()).unwrap(),
             skill_dirs: vec![root.path().join("agent/skills")],
@@ -448,6 +465,7 @@ fn factory_branch_contained_directory_symlinks_remain_discoverable() {
     std::os::unix::fs::symlink("../assets/example", root.path().join("skills/linked")).unwrap();
     std::os::unix::fs::symlink("skills", root.path().join("skills-alias")).unwrap();
     let definitions = ActivatedDefinitions {
+        execution_id: "42".into(),
         metadata: metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         root: dunce::canonicalize(root.path()).unwrap(),
         skill_dirs: vec![root.path().join("skills-alias")],
@@ -491,18 +509,14 @@ fn factory_branch_git_diagnostics_redact_encoded_credentials_before_truncation()
 #[test]
 fn factory_branch_rejects_unsafe_source_paths() {
     let valid = metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    let mut traversal = valid.clone();
-    traversal.skill_dirs = vec!["../skills".into()];
-    assert!(validate_metadata(&traversal).is_err());
-    let mut absolute = valid.clone();
-    absolute.skill_dirs = vec!["C:\\skills".into()];
-    assert!(validate_metadata(&absolute).is_err());
+    assert!(validate_metadata(&valid, &["../skills".into()]).is_err());
+    assert!(validate_metadata(&valid, &["C:\\skills".into()]).is_err());
     let mut credential_url = valid.clone();
     credential_url.repository_url = "https://user:password@fixture.invalid/definitions".into();
-    assert!(validate_metadata(&credential_url).is_err());
+    assert!(validate_metadata(&credential_url, &[]).is_err());
     let mut branch = valid;
     branch.branch_id = cynic::Id::new("../other");
-    assert!(validate_metadata(&branch).is_err());
+    assert!(validate_metadata(&branch, &[]).is_err());
 }
 
 #[cfg(unix)]
@@ -515,7 +529,9 @@ async fn factory_branch_rejects_symlinked_definition_parent() {
     assert!(
         materialize(
             dir.path(),
+            "42",
             &metadata("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            &[],
             None
         )
         .await

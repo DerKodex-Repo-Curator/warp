@@ -40,7 +40,9 @@ use warp_cli::{CliCommand, GlobalOptions, OZ_HARNESS_ENV};
 use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
 use warp_graphql::object_permissions::OwnerType;
-use warp_graphql::queries::execution_config::ExecutionConfiguration;
+use warp_graphql::queries::execution_config::{
+    ExecutionConfiguration, FactoryExecutionDefinitions,
+};
 use warp_isolation_platform::IsolationPlatformError;
 #[cfg(not(target_family = "wasm"))]
 use warp_logging::log_file_path;
@@ -655,7 +657,11 @@ fn build_execution_task_and_options(
         anyhow::bail!("An execution that skips its initial turn requires an idle window");
     }
     let providers = execution_config::providers(config.providers);
-    let mut factory_skill_dirs = execution_config::factory_skill_dirs(config.factory_skill_dirs)?;
+    let mut factory_skill_dirs = if config.factory_branch.is_some() {
+        Vec::new()
+    } else {
+        execution_config::factory_skill_dirs(config.factory_skill_dirs)?
+    };
     for dir in skill_discovery_dirs {
         if !factory_skill_dirs.contains(&dir) {
             factory_skill_dirs.push(dir);
@@ -881,7 +887,20 @@ impl AgentDriverRunner {
             setup_events
                 .post_timeline_event(OzRunTimelineEvent::WorkerContainerReady)
                 .await;
-            let execution_data = if (FeatureFlag::CloudAgentExecutionConfig.is_enabled() || std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty()))
+            let factory_branch = std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty());
+            let factory_child_config = if factory_branch && !args.sandboxed {
+                let task_id = args.task_id.as_deref().context("Missing Factory task ID")
+                    .map_err(AgentDriverError::ConfigBuildFailed)?;
+                let execution_id = args.execution_id.as_deref().context("Missing controlling Factory execution ID")
+                    .map_err(AgentDriverError::ConfigBuildFailed)?;
+                let config = server_api.get_factory_definition_config(task_id, execution_id).await
+                    .map_err(AgentDriverError::ConfigBuildFailed)?;
+                config.parent_run_id.is_some().then_some(config)
+            } else {
+                None
+            };
+            let execution_data = if factory_child_config.is_none()
+                && (FeatureFlag::CloudAgentExecutionConfig.is_enabled() || factory_branch)
                 && let (Some(task_id), Some(execution_id)) =
                     (args.task_id.as_deref(), args.execution_id.as_deref())
             {
@@ -964,6 +983,7 @@ impl AgentDriverRunner {
                     &server_api,
                     &setup_events,
                     execution_data,
+                    factory_child_config,
                 )
                 .await?;
 
@@ -1179,48 +1199,23 @@ impl AgentDriverRunner {
                 let task_id_str = task_id_str.clone();
                 let ai_client = Arc::clone(&ai_client);
                 async move {
-                    driver::git_credentials::ensure_workload_token_available().inspect_err(
-                        |_| {
-                            driver::git_credentials::update_definition_credential(
-                                &task_id_str,
-                                None,
-                            )
-                        },
-                    )?;
-
+                    driver::git_credentials::ensure_workload_token_available()?;
                     let workload_token = warp_isolation_platform::issue_workload_token(Some(
-                        std::time::Duration::from_secs(5 * 60),
+                        Duration::from_secs(5 * 60),
                     ))
                     .await
-                    .map_err(|error| {
-                        driver::git_credentials::update_definition_credential(&task_id_str, None);
-                        TaskGitCredentialsError::Request(error.into())
-                    })?
+                    .map_err(|error| TaskGitCredentialsError::Request(error.into()))?
                     .token;
                     let response = ai_client
                         .get_task_git_credentials(
-                            task_id_str.clone(),
+                            task_id_str,
                             workload_token,
                             false,
                             use_factory_repositories,
                         )
-                        .await;
-                    driver::git_credentials::update_definition_credential(
-                        &task_id_str,
-                        response
-                            .as_ref()
-                            .ok()
-                            .and_then(|response| response.definition_credential.clone()),
-                    );
-                    let response = response?;
+                        .await?;
                     driver::git_credentials::credentials_for_bootstrap(response)
                         .map_err(TaskGitCredentialsError::Request)
-                        .inspect_err(|_| {
-                            driver::git_credentials::update_definition_credential(
-                                &task_id_str,
-                                None,
-                            )
-                        })
                 }
             },
             driver::git_credentials::is_retryable,
@@ -1329,7 +1324,6 @@ impl AgentDriverRunner {
         }
 
         driver::git_credentials::configure_git_credentials(&credentials).map_err(|err| {
-            driver::git_credentials::update_definition_credential(&task_id_str, None);
             log::warn!("Failed to write git credentials before skill resolution: {err:#}");
             tracing::warn!(
                 error = ?err,
@@ -1455,6 +1449,7 @@ impl AgentDriverRunner {
         server_api: &Arc<dyn AIClient>,
         setup_events: &SetupClientEventReporter,
         execution_data: Option<ExecutionTaskData>,
+        factory_child_config: Option<FactoryExecutionDefinitions>,
     ) -> Result<(AgentDriverOptions, Task, Option<String>), AgentDriverError> {
         // Get the working directory
         let working_dir = match args.cwd.as_ref() {
@@ -1464,14 +1459,14 @@ impl AgentDriverRunner {
         }
         .map_err(AgentDriverError::ConfigBuildFailed)?;
 
-        let factory_preview =
+        let factory_branch =
             std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty());
-        if factory_preview && args.task_id.is_none() {
+        if factory_branch && args.task_id.is_none() {
             return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
-                "Factory previews require a configured Factory task"
+                "Factory branches require a configured Factory task"
             )));
         }
-        let factory_descendant = factory_preview && execution_data.is_none();
+        let factory_descendant = factory_child_config.is_some();
         if let Some(task_id_str) = args.task_id.as_ref()
             && !factory_descendant
         {
@@ -1493,18 +1488,16 @@ impl AgentDriverRunner {
             attachments,
         }) = execution_data
         {
-            if factory_preview && config.factory_definitions.is_none() {
+            if factory_branch && config.factory_branch.is_none() {
                 return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
                     "Factory execution configuration has no selected definitions"
                 )));
             }
             let definitions = crate::ai::factory_definitions::prepare_from_config(
-                args.task_id
-                    .as_deref()
-                    .context("Missing execution task ID")
-                    .map_err(AgentDriverError::ConfigBuildFailed)?,
                 &working_dir,
-                config.factory_definitions.as_ref(),
+                config.execution_id.inner(),
+                config.factory_branch.as_ref(),
+                &config.factory_skill_dirs,
             )
             .await
             .map_err(AgentDriverError::ConfigBuildFailed)?;
@@ -1573,15 +1566,16 @@ impl AgentDriverRunner {
             }
             return Ok((options, task, conversation_id));
         }
-        let definitions = if factory_descendant {
-            crate::ai::factory_definitions::prepare_child(
-                args.task_id
-                    .as_deref()
-                    .context("Missing Factory child task ID")
-                    .map_err(AgentDriverError::ConfigBuildFailed)?,
+        let definitions = if let Some(config) = factory_child_config {
+            let branch = config
+                .factory_branch
+                .context("Factory child configuration has no selected definitions")
+                .map_err(AgentDriverError::ConfigBuildFailed)?;
+            crate::ai::factory_definitions::prepare_from_config(
                 &working_dir,
-                true,
-                server_api.as_ref(),
+                config.execution_id.inner(),
+                Some(&branch),
+                &config.factory_skill_dirs,
             )
             .await
             .map_err(AgentDriverError::ConfigBuildFailed)?

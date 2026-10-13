@@ -53,6 +53,141 @@ use crate::workspaces::workspace::{Workspace, WorkspaceUid};
 const TASK_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[test]
+fn factory_branch_sdk_child_activates_definitions_without_remote_bootstrap() {
+    use git2::{Repository, Signature};
+    use warp_graphql::queries::execution_config::{
+        FactoryBranchExecutionConfig, FactoryExecutionDefinitions,
+    };
+
+    let Ok(root) = std::env::var("WARP_SDK_FACTORY_FIXTURE") else {
+        let root = tempfile::tempdir().unwrap();
+        let repository = Repository::init(root.path().join("source")).unwrap();
+        let tree = repository
+            .find_tree(repository.index().unwrap().write_tree().unwrap())
+            .unwrap();
+        let signature = Signature::now("Fixture", "fixture@example.invalid").unwrap();
+        repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Definitions",
+                &tree,
+                &[],
+            )
+            .unwrap();
+        fs::create_dir(root.path().join("working")).unwrap();
+        let source = url::Url::from_directory_path(repository.workdir().unwrap()).unwrap();
+        let output = ProcessCommand::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ai::agent_sdk::tests::factory_branch_sdk_child_activates_definitions_without_remote_bootstrap", "--nocapture"])
+            .env("WARP_SDK_FACTORY_FIXTURE", root.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", root.path().join("empty-config"))
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", format!("url.{source}.insteadOf"))
+            .env("GIT_CONFIG_VALUE_0", "https://fixture.invalid/definitions")
+            .env("GIT_CONFIG_KEY_1", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_1", "always")
+            .env("WARP_ISOLATION_PLATFORM", "docker")
+            .env("WARP_WORKLOAD_TOKEN", "test-workload-token")
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let repository = Repository::open(root.join("source")).unwrap();
+    let source_sha = repository.head().unwrap().target().unwrap().to_string();
+    App::test((), |mut app| async move {
+        let _refresh = FeatureFlag::GitCredentialRefresh.override_enabled(true);
+        let _handoff = FeatureFlag::OzHandoff.override_enabled(false);
+        app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+        let runner = app.add_singleton_model(|_| AgentDriverRunner);
+        let foreground = runner.update(&mut app, |_, ctx| ctx.spawner());
+        let now = Utc::now();
+        let metadata = AmbientAgentTask {
+            task_id: TASK_ID.parse().unwrap(),
+            parent_run_id: Some("parent".into()),
+            title: String::new(),
+            state: AmbientAgentTaskState::InProgress,
+            prompt: String::new(),
+            created_at: now,
+            started_at: None,
+            updated_at: now,
+            run_time: None,
+            status_message: None,
+            source: None,
+            execution_location: None,
+            session_id: None,
+            session_link: None,
+            creator: None,
+            executor: None,
+            conversation_id: None,
+            request_usage: None,
+            is_sandbox_running: false,
+            agent_config_snapshot: None,
+            artifacts: vec![],
+            last_event_sequence: None,
+            children: vec![],
+            debug_agent_available: false,
+            scope: None,
+        };
+        let mut client = MockAIClient::new();
+        client
+            .expect_get_ambient_agent_task()
+            .times(1)
+            .return_once(move |_| Ok(metadata));
+        client.expect_get_task_git_credentials().times(0);
+        client.expect_get_task_attachments().times(0);
+        let client: Arc<dyn AIClient> = Arc::new(client);
+        let events = runner.update(&mut app, |_, ctx| {
+            super::SetupClientEventReporter::noop(client.clone(), ctx.background_executor())
+        });
+        let mut args =
+            parse_run_agent_args(&["agent", "run", "--task-id", TASK_ID, "--execution-id", "42"]);
+        args.cwd = Some(root.join("working"));
+        args.environment = Some("must-not-bootstrap".into());
+        let config = FactoryExecutionDefinitions {
+            execution_id: cynic::Id::new("42"),
+            parent_run_id: Some(cynic::Id::new("parent")),
+            factory_skill_dirs: vec!["skills".into()],
+            factory_branch: Some(FactoryBranchExecutionConfig {
+                factory_id: cynic::Id::new("factory"),
+                branch_id: cynic::Id::new("branch"),
+                branch: "feature".into(),
+                source_sha,
+                repository_url: "https://fixture.invalid/definitions".into(),
+            }),
+        };
+        let (options, _, _) = AgentDriverRunner::build_driver_options_and_task(
+            &foreground,
+            args,
+            None,
+            &client,
+            &events,
+            None,
+            Some(config),
+        )
+        .await
+        .unwrap();
+        assert_eq!(options.task_id.unwrap().to_string(), TASK_ID);
+        assert_eq!(options.parent_run_id.as_deref(), Some("parent"));
+        assert!(options.secrets.is_empty());
+        assert!(options.workspace.source_repos.is_empty());
+        let definitions = options.workspace.factory_definitions.unwrap();
+        assert_eq!(definitions.execution_id, "42");
+        assert_eq!(
+            options.workspace.factory_skill_dirs.unwrap(),
+            definitions.skill_dirs
+        );
+    });
+}
+
+#[test]
 fn paired_execution_launch_keeps_inventory_separate_from_eager_membership() {
     App::test((), |mut app| async move {
         let root = tempfile::TempDir::new().unwrap();
@@ -263,6 +398,7 @@ fn deferred_capability_bootstrap_subprocess() {
             &ai_client,
             &events,
             Some(data),
+            None,
         )
         .await
         .unwrap();

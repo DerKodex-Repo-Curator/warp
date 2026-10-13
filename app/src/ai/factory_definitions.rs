@@ -9,44 +9,56 @@ use command::Stdio;
 use command::r#async::Command;
 use futures::AsyncWriteExt as _;
 use uuid::Uuid;
-use warp_graphql::queries::execution_config::FactoryDefinitionConfig;
+use warp_graphql::queries::execution_config::FactoryBranchExecutionConfig;
 
 use crate::server::server_api::ai::GitCredential;
 pub(crate) async fn prepare_child(
     task_id: &str,
     working_dir: &Path,
-    factory_preview: bool,
+    execution_id: Option<&str>,
     client: &dyn crate::server::server_api::ai::AIClient,
 ) -> anyhow::Result<Option<ActivatedDefinitions>> {
-    if !factory_preview {
+    let Some(execution_id) = execution_id else {
         return Ok(None);
-    }
+    };
     let config = client
-        .get_factory_definition_config(task_id)
-        .await?
+        .get_factory_definition_config(task_id, execution_id)
+        .await?;
+    let branch = config
+        .factory_branch
         .context("Factory child execution configuration has no selected definitions")?;
-    prepare_from_config(task_id, working_dir, Some(&config)).await
+    prepare_from_config(
+        working_dir,
+        config.execution_id.inner(),
+        Some(&branch),
+        &config.factory_skill_dirs,
+    )
+    .await
 }
 
 const SETUP_BUDGET: Duration = Duration::from_secs(30);
 pub(crate) async fn prepare_from_config(
-    task_id: &str,
     working_dir: &Path,
-    config: Option<&warp_graphql::queries::execution_config::FactoryDefinitionConfig>,
+    execution_id: &str,
+    config: Option<&FactoryBranchExecutionConfig>,
+    skill_dirs: &[String],
 ) -> anyhow::Result<Option<ActivatedDefinitions>> {
     let Some(config) = config else {
         return Ok(None);
     };
     let metadata = config.clone();
-    validate_metadata(&metadata)?;
+    validate_metadata(&metadata, skill_dirs)?;
     async_compat::Compat::new(async {
         tokio::time::timeout(SETUP_BUDGET, async {
-            let credential =
-                match super::agent_sdk::driver::git_credentials::definition_credential(task_id) {
-                    Some(credential) => Some(credential),
-                    None => installed_credential(working_dir, &metadata).await?,
-                };
-            let mut definitions = materialize(working_dir, &metadata, credential.as_ref()).await?;
+            let credential = installed_credential(working_dir, &metadata).await?;
+            let mut definitions = materialize(
+                working_dir,
+                execution_id,
+                &metadata,
+                skill_dirs,
+                credential.as_ref(),
+            )
+            .await?;
             definitions.skills = read_selected_skills(&definitions.skill_dirs)?;
             Ok(Some(definitions))
         })
@@ -58,7 +70,8 @@ pub(crate) async fn prepare_from_config(
 
 #[derive(Clone, Debug)]
 pub struct ActivatedDefinitions {
-    pub metadata: FactoryDefinitionConfig,
+    pub execution_id: String,
+    pub metadata: FactoryBranchExecutionConfig,
     pub root: PathBuf,
     pub skill_dirs: Vec<PathBuf>,
     pub(crate) skills: Vec<ai::skills::ParsedSkill>,
@@ -121,6 +134,7 @@ impl ActivatedDefinitions {
     }
     pub fn env_vars(&self) -> HashMap<OsString, OsString> {
         HashMap::from([
+            ("WARP_EXECUTION_ID".into(), self.execution_id.clone().into()),
             (
                 "WARP_FACTORY_ID".into(),
                 self.metadata.factory_id.inner().into(),
@@ -222,7 +236,10 @@ fn validate_optional_skill_directory(path: &Path) -> anyhow::Result<bool> {
     bail!("Factory skill directory has no existing ancestor")
 }
 
-fn validate_metadata(metadata: &FactoryDefinitionConfig) -> anyhow::Result<()> {
+fn validate_metadata(
+    metadata: &FactoryBranchExecutionConfig,
+    skill_dirs: &[String],
+) -> anyhow::Result<()> {
     let branch = metadata.branch_id.inner();
     if branch.is_empty()
         || !branch
@@ -248,7 +265,7 @@ fn validate_metadata(metadata: &FactoryDefinitionConfig) -> anyhow::Result<()> {
     {
         bail!("Factory definition repository URL must be credential-free HTTPS");
     }
-    for dir in &metadata.skill_dirs {
+    for dir in skill_dirs {
         if dir.is_empty()
             || dir.trim() != dir
             || dir.contains([',', '\\', '\0', ':'])
@@ -280,10 +297,12 @@ fn real_directory(path: &Path) -> anyhow::Result<()> {
 
 async fn materialize(
     working_dir: &Path,
-    metadata: &FactoryDefinitionConfig,
+    execution_id: &str,
+    metadata: &FactoryBranchExecutionConfig,
+    skill_dirs: &[String],
     credential: Option<&GitCredential>,
 ) -> anyhow::Result<ActivatedDefinitions> {
-    validate_metadata(metadata)?;
+    validate_metadata(metadata, skill_dirs)?;
     let working_dir = dunce::canonicalize(working_dir)?;
     if working_dir.to_string_lossy().contains(',') {
         bail!("Factory definition working directory cannot contain a comma");
@@ -339,12 +358,9 @@ async fn materialize(
         bail!("Factory definition checkout does not match the checked source SHA");
     }
     let definitions = ActivatedDefinitions {
+        execution_id: execution_id.to_owned(),
         metadata: metadata.clone(),
-        skill_dirs: metadata
-            .skill_dirs
-            .iter()
-            .map(|dir| root.join(dir))
-            .collect(),
+        skill_dirs: skill_dirs.iter().map(|dir| root.join(dir)).collect(),
         root,
         skills: Vec::new(),
     };
@@ -354,7 +370,7 @@ async fn materialize(
 
 fn temporary_credential(
     credential: &GitCredential,
-    metadata: &FactoryDefinitionConfig,
+    metadata: &FactoryBranchExecutionConfig,
 ) -> anyhow::Result<tempfile::NamedTempFile> {
     let repository = url::Url::parse(&metadata.repository_url)?;
     if repository.host_str() != Some(&credential.host) || credential.token.is_empty() {
@@ -375,7 +391,7 @@ fn temporary_credential(
 
 async fn installed_credential(
     working_dir: &Path,
-    metadata: &FactoryDefinitionConfig,
+    metadata: &FactoryBranchExecutionConfig,
 ) -> anyhow::Result<Option<GitCredential>> {
     let mut child = Command::new("git")
         .current_dir(working_dir)

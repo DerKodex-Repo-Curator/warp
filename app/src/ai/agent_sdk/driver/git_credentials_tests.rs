@@ -51,7 +51,6 @@ fn retained_scope_refresh_subprocess() {
                 Ok(TaskGitCredentialsResponse {
                     credentials: Vec::new(),
                     failed_hosts: Vec::new(),
-                    definition_credential: None,
                 })
             });
         let ai_client: Arc<dyn AIClient> = Arc::new(ai_client);
@@ -733,7 +732,6 @@ fn bootstrap_rejects_a_one_host_failure() {
     let error = credentials_for_bootstrap(TaskGitCredentialsResponse {
         credentials: vec![github_credential()],
         failed_hosts: vec!["gitlab.com".to_string()],
-        definition_credential: None,
     })
     .unwrap_err();
 
@@ -746,7 +744,6 @@ fn bootstrap_accepts_complete_multi_host_credentials() {
     let credentials = credentials_for_bootstrap(TaskGitCredentialsResponse {
         credentials: vec![github_credential(), gitlab_credential()],
         failed_hosts: vec![],
-        definition_credential: None,
     })
     .unwrap();
 
@@ -844,7 +841,6 @@ fn refreshed_credentials_return_err_when_the_local_write_fails() {
     let error = apply_refreshed_credentials(TaskGitCredentialsResponse {
         credentials: vec![github_credential(), conflicting],
         failed_hosts: vec![],
-        definition_credential: None,
     })
     .unwrap_err();
 

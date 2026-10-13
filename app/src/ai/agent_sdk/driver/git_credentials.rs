@@ -13,7 +13,7 @@ use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock, RwLock},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 
@@ -54,27 +54,6 @@ const AZURE_DEVOPS_AUTH_DIR: &str = "azure-devops";
 const AZURE_DEVOPS_TOKEN_FILENAME: &str = "entra-token";
 const AZURE_DEVOPS_BIN_DIR: &str = "bin";
 const AZURE_CLI_FILENAME: &str = "az";
-
-static DEFINITION_CREDENTIALS: LazyLock<RwLock<HashMap<String, GitCredential>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-pub(crate) fn definition_credential(task_id: &str) -> Option<GitCredential> {
-    DEFINITION_CREDENTIALS.read().ok()?.get(task_id).cloned()
-}
-
-pub(crate) fn update_definition_credential(task_id: &str, credential: Option<GitCredential>) {
-    let Ok(mut credentials) = DEFINITION_CREDENTIALS.write() else {
-        return;
-    };
-    match credential {
-        Some(credential) => {
-            credentials.insert(task_id.to_owned(), credential);
-        }
-        None => {
-            credentials.remove(task_id);
-        }
-    }
-}
 
 /// Whether a `TaskGitCredentialsError` is worth retrying. Platform errors
 /// defer to the server's `retryable` flag; request-layer errors are retried
@@ -934,17 +913,12 @@ async fn try_refresh(
     ai_client: &Arc<dyn AIClient>,
     use_factory_repositories: bool,
 ) -> Result<(), TaskGitCredentialsError> {
-    ensure_workload_token_available()
-        .inspect_err(|_| update_definition_credential(task_id, None))?;
+    ensure_workload_token_available()?;
     let workload_token =
         warp_isolation_platform::issue_workload_token(Some(Duration::from_secs(5 * 60)))
             .await
-            .map_err(|error| {
-                update_definition_credential(task_id, None);
-                TaskGitCredentialsError::Request(error.into())
-            })?
+            .map_err(|error| TaskGitCredentialsError::Request(error.into()))?
             .token;
-
     let response = ai_client
         .get_task_git_credentials(
             task_id.to_string(),
@@ -952,23 +926,10 @@ async fn try_refresh(
             true,
             use_factory_repositories,
         )
-        .await;
-    update_definition_credential(
-        task_id,
-        response
-            .as_ref()
-            .ok()
-            .and_then(|response| response.definition_credential.clone()),
-    );
-    let response = response?;
-
-    if apply_refreshed_credentials(response)
-        .map_err(TaskGitCredentialsError::Request)
-        .inspect_err(|_| update_definition_credential(task_id, None))?
-    {
+        .await?;
+    if apply_refreshed_credentials(response).map_err(TaskGitCredentialsError::Request)? {
         Ok(())
     } else {
-        update_definition_credential(task_id, None);
         Err(TaskGitCredentialsError::Request(anyhow::anyhow!(
             "Git credentials remained stale for some forges"
         )))

@@ -2407,8 +2407,11 @@ impl TuiTerminalSessionView {
         self.cli_agent_osc_event_publisher = Some(publisher);
     }
 
-    pub(crate) fn has_factory_definitions(&self, ctx: &AppContext) -> bool {
-        self.ai_controller.as_ref(ctx).has_factory_definitions()
+    pub(crate) fn factory_execution_id(&self, ctx: &AppContext) -> Option<String> {
+        self.ai_controller
+            .as_ref(ctx)
+            .factory_execution_id()
+            .map(str::to_owned)
     }
 
     /// Starts the first request for a child conversation hosted by this

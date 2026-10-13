@@ -826,7 +826,6 @@ impl std::fmt::Debug for GitCredential {
 pub struct TaskGitCredentialsResponse {
     pub credentials: Vec<GitCredential>,
     pub failed_hosts: Vec<String>,
-    pub definition_credential: Option<GitCredential>,
 }
 
 /// Filter parameters for listing ambient agent tasks.
@@ -1270,7 +1269,8 @@ pub trait AIClient: 'static + Send + Sync {
     async fn get_factory_definition_config(
         &self,
         task_id: &str,
-    ) -> anyhow::Result<Option<warp_graphql::queries::execution_config::FactoryDefinitionConfig>>;
+        execution_id: &str,
+    ) -> anyhow::Result<warp_graphql::queries::execution_config::FactoryExecutionDefinitions>;
     async fn generate_commands_from_natural_language(
         &self,
         prompt: String,
@@ -1913,7 +1913,6 @@ impl ServerApi {
                         .map(into_git_credential)
                         .collect(),
                     failed_hosts: output.failed_hosts,
-                    definition_credential: output.definition_credential.map(into_git_credential),
                 })
             }
             TaskGitCredentialsResult::UserFacingError(error) => {
@@ -1952,7 +1951,6 @@ impl ServerApi {
                         .map(into_git_credential)
                         .collect(),
                     failed_hosts: Vec::new(),
-                    definition_credential: None,
                 })
             }
             TaskGitCredentialsLegacyResult::UserFacingError(error) => {
@@ -1981,9 +1979,8 @@ fn is_unknown_git_credential_schema_error(error: &TaskGitCredentialsError) -> bo
         return false;
     };
     let message = error.to_string();
-    let names_partial_refresh_field = message.contains("failedHosts")
-        || message.contains("acceptsPartialRefresh")
-        || message.contains("definitionCredential");
+    let names_partial_refresh_field =
+        message.contains("failedHosts") || message.contains("acceptsPartialRefresh");
     names_partial_refresh_field
         && (message.contains("Cannot query field")
             || message.contains("Unknown argument")
@@ -2025,14 +2022,15 @@ impl AIClient for ServerApi {
     async fn get_factory_definition_config(
         &self,
         task_id: &str,
-    ) -> anyhow::Result<Option<warp_graphql::queries::execution_config::FactoryDefinitionConfig>>
-    {
+        execution_id: &str,
+    ) -> anyhow::Result<warp_graphql::queries::execution_config::FactoryExecutionDefinitions> {
         use warp_graphql::queries::execution_config::{
             FactoryExecutionConfig, FactoryExecutionConfigVariables, FactoryExecutionTaskResult,
         };
         let response = self
             .send_graphql_request(
                 FactoryExecutionConfig::build(FactoryExecutionConfigVariables {
+                    execution_id: cynic::Id::new(execution_id),
                     task_input: TaskInput {
                         task_id: cynic::Id::new(task_id),
                     },
@@ -2042,9 +2040,7 @@ impl AIClient for ServerApi {
             )
             .await?;
         match response.task {
-            FactoryExecutionTaskResult::TaskOutput(output) => {
-                Ok(output.task.execution_config.factory_definitions)
-            }
+            FactoryExecutionTaskResult::TaskOutput(output) => Ok(output.task.execution_config),
             FactoryExecutionTaskResult::UserFacingError(error) => {
                 Err(anyhow!(get_user_facing_error_message(error)))
             }
