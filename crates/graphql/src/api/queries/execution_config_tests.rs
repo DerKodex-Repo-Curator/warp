@@ -1,51 +1,9 @@
 use cynic::QueryBuilder;
 
-use super::{
-    ExecutionBootstrap, ExecutionBootstrapVariables, FactoryExecutionConfig,
-    FactoryExecutionConfigVariables,
-};
+use super::{ExecutionBootstrap, ExecutionBootstrapVariables};
 use crate::api::queries::task_attachments::TaskInput;
 use crate::api::queries::task_secrets::TaskSecretsInput;
 use crate::request_context::{ClientContext, OsContext, RequestContext};
-
-#[test]
-fn factory_branch_child_query_requires_controlling_execution_without_remote_bootstrap() {
-    let operation = FactoryExecutionConfig::build(FactoryExecutionConfigVariables {
-        execution_id: "42".into(),
-        task_input: TaskInput {
-            task_id: "child".into(),
-        },
-        request_context: RequestContext {
-            client_context: ClientContext { version: None },
-            os_context: OsContext {
-                category: None,
-                linux_kernel_version: None,
-                name: None,
-                version: None,
-            },
-        },
-    });
-    assert!(operation.query.contains("$executionId: ID!"));
-    assert!(
-        operation
-            .query
-            .contains("executionConfig(executionId: $executionId)")
-    );
-    assert!(operation.query.contains("factoryBranch"));
-    assert!(operation.query.contains("factorySkillDirs"));
-    for field in [
-        "skillDirs",
-        "taskSecrets",
-        "repositories",
-        "setupCommands",
-        "providers",
-    ] {
-        assert!(!operation.query.contains(field), "child fetched {field}");
-    }
-    let variables = serde_json::to_value(&operation.variables).unwrap();
-    assert_eq!(variables["executionId"], "42");
-    assert_eq!(variables["taskInput"]["taskId"], "child");
-}
 
 #[test]
 fn bootstrap_fetches_all_task_data_in_one_operation() {
@@ -80,7 +38,9 @@ fn bootstrap_fetches_all_task_data_in_one_operation() {
             "teamId",
             "factorySkillDirs",
             "factoryBranch",
+            "factoryId",
             "branchId",
+            "branch",
             "sourceSha",
             "repositoryUrl",
             "preserveOrigin",
@@ -104,5 +64,6 @@ fn bootstrap_fetches_all_task_data_in_one_operation() {
         assert_eq!(variables["secretsInput"]["workloadToken"], "token");
         assert_eq!(variables["taskInput"]["taskId"], "task");
         assert!(!query.contains("executionConfig(input:"));
+        assert!(query.contains("$executionId: ID!"));
     }
 }

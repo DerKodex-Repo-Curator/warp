@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use ai::api_keys::{ApiKeyManager, AwsCredentialsRefreshStrategy};
 use anyhow::Context;
+use command::Stdio;
+use command::r#async::Command;
 pub use driver::AgentDriver;
 use driver::AgentDriverError;
 pub(crate) use driver::harness::{ClaudeHarness, task_env_vars, validate_cli_installed};
@@ -40,9 +42,7 @@ use warp_cli::{CliCommand, GlobalOptions, OZ_HARNESS_ENV};
 use warp_core::features::FeatureFlag;
 use warp_errors::report_error;
 use warp_graphql::object_permissions::OwnerType;
-use warp_graphql::queries::execution_config::{
-    ExecutionConfiguration, FactoryExecutionDefinitions,
-};
+use warp_graphql::queries::execution_config::ExecutionConfiguration;
 use warp_isolation_platform::IsolationPlatformError;
 #[cfg(not(target_family = "wasm"))]
 use warp_logging::log_file_path;
@@ -613,7 +613,7 @@ fn build_execution_task_and_options(
     use_factory_repositories: bool,
     working_dir: PathBuf,
     first_skill: Option<ResolvedSkill>,
-    skill_discovery_dirs: Vec<PathBuf>,
+    factory_skill_dirs: Vec<PathBuf>,
     ctx: &mut AppContext,
 ) -> anyhow::Result<(
     AgentDriverOptions,
@@ -657,16 +657,6 @@ fn build_execution_task_and_options(
         anyhow::bail!("An execution that skips its initial turn requires an idle window");
     }
     let providers = execution_config::providers(config.providers);
-    let mut factory_skill_dirs = if config.factory_branch.is_some() {
-        Vec::new()
-    } else {
-        execution_config::factory_skill_dirs(config.factory_skill_dirs)?
-    };
-    for dir in skill_discovery_dirs {
-        if !factory_skill_dirs.contains(&dir) {
-            factory_skill_dirs.push(dir);
-        }
-    }
     let task = Task {
         prompt: AgentRunPrompt::ServerSide {
             skill: first_skill.map(|skill| skill.parsed_skill),
@@ -723,6 +713,115 @@ fn build_execution_task_and_options(
         config.conversation_id.map(|id| id.into_inner()),
         providers,
     ))
+}
+
+async fn prepare_execution_factory_skill_dirs(
+    config: &ExecutionConfiguration,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let dirs = execution_config::factory_skill_dirs(config.factory_skill_dirs.clone())?;
+    let Some(branch) = &config.factory_branch else {
+        return Ok(dirs);
+    };
+    if branch.source_sha.len() != 40
+        || !branch
+            .source_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("Factory definitions require a full source SHA");
+    }
+    let url = url::Url::parse(&branch.repository_url)
+        .context("Invalid Factory definition repository URL")?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || branch.repository_url.chars().any(char::is_control)
+    {
+        anyhow::bail!("Factory definition repository URL must be credential-free HTTPS");
+    }
+    if config
+        .factory_skill_dirs
+        .iter()
+        .any(|dir| dir.contains(['\\', ':']) || dir.chars().any(char::is_control))
+    {
+        anyhow::bail!("Factory skill directories must be repository-relative paths");
+    }
+    async_compat::Compat::new(async {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let leaf = tempfile::Builder::new().prefix("warp-factory-").tempdir()?;
+            let root = dunce::canonicalize(leaf.path())?;
+            if root.to_string_lossy().contains(',') {
+                anyhow::bail!("Factory definition directory cannot contain a comma");
+            }
+            factory_definition_git(&root, &["init", "--quiet", "--template="]).await?;
+            factory_definition_git(&root, &["remote", "add", "origin", &branch.repository_url])
+                .await?;
+            factory_definition_git(
+                &root,
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--depth=1",
+                    "origin",
+                    &branch.source_sha,
+                ],
+            )
+            .await?;
+            factory_definition_git(
+                &root,
+                &["checkout", "--quiet", "--detach", &branch.source_sha],
+            )
+            .await?;
+            let head = factory_definition_git(&root, &["rev-parse", "HEAD"]).await?;
+            if !head.trim().eq_ignore_ascii_case(&branch.source_sha) {
+                anyhow::bail!("Factory definition checkout does not match its source SHA");
+            }
+            for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+                let entry = entry?;
+                if entry.file_type().is_symlink()
+                    && !dunce::canonicalize(entry.path())
+                        .context("Factory definition contains a dangling symlink")?
+                        .starts_with(&root)
+                {
+                    anyhow::bail!("Factory definition symlink escapes its checkout");
+                }
+            }
+            let dirs = dirs.into_iter().map(|dir| root.join(dir)).collect();
+            // Native harness publications retain symlinks into this checkout beyond SDK setup.
+            let _ = leaf.keep();
+            Ok(dirs)
+        })
+        .await
+        .context("Factory definition checkout timed out")?
+    })
+    .await
+}
+
+async fn factory_definition_git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["-c", "core.hooksPath=.git/warp-no-hooks"])
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("Could not run Git for Factory definitions")?;
+    if !output.status.success() {
+        anyhow::bail!("Factory definition Git {} failed", args[0]);
+    }
+    String::from_utf8(output.stdout).context("Invalid Factory definition Git output")
 }
 fn selected_execution_skills(
     skills: Vec<ResolvedSkill>,
@@ -887,25 +986,7 @@ impl AgentDriverRunner {
             setup_events
                 .post_timeline_event(OzRunTimelineEvent::WorkerContainerReady)
                 .await;
-            let factory_branch = std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty());
-            if factory_branch && (args.gui || !warp_isolation_platform::workload_token_available()) {
-                return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
-                    "Factory branches require a headless cloud task workload"
-                )));
-            }
-            let factory_child_config = if factory_branch && !args.sandboxed {
-                let task_id = args.task_id.as_deref().context("Missing Factory task ID")
-                    .map_err(AgentDriverError::ConfigBuildFailed)?;
-                let execution_id = args.execution_id.as_deref().context("Missing controlling Factory execution ID")
-                    .map_err(AgentDriverError::ConfigBuildFailed)?;
-                let config = server_api.get_factory_definition_config(task_id, execution_id).await
-                    .map_err(AgentDriverError::ConfigBuildFailed)?;
-                config.parent_run_id.is_some().then_some(config)
-            } else {
-                None
-            };
-            let execution_data = if factory_child_config.is_none()
-                && (FeatureFlag::CloudAgentExecutionConfig.is_enabled() || factory_branch)
+            let execution_data = if FeatureFlag::CloudAgentExecutionConfig.is_enabled()
                 && let (Some(task_id), Some(execution_id)) =
                     (args.task_id.as_deref(), args.execution_id.as_deref())
             {
@@ -988,7 +1069,6 @@ impl AgentDriverRunner {
                     &server_api,
                     &setup_events,
                     execution_data,
-                    factory_child_config,
                 )
                 .await?;
 
@@ -1205,8 +1285,9 @@ impl AgentDriverRunner {
                 let ai_client = Arc::clone(&ai_client);
                 async move {
                     driver::git_credentials::ensure_workload_token_available()?;
+
                     let workload_token = warp_isolation_platform::issue_workload_token(Some(
-                        Duration::from_secs(5 * 60),
+                        std::time::Duration::from_secs(5 * 60),
                     ))
                     .await
                     .map_err(|error| TaskGitCredentialsError::Request(error.into()))?
@@ -1351,7 +1432,6 @@ impl AgentDriverRunner {
         foreground: &ModelSpawner<Self>,
         args: &RunAgentArgs,
         working_dir: &Path,
-        definitions: Option<&crate::ai::factory_definitions::ActivatedDefinitions>,
         setup_events: &SetupClientEventReporter,
     ) -> Result<Option<ResolvedSkill>, AgentDriverError> {
         if !FeatureFlag::OzPlatformSkills.is_enabled() {
@@ -1360,17 +1440,6 @@ impl AgentDriverRunner {
         let Some(skill_spec) = args.skill.clone() else {
             return Ok(None);
         };
-        crate::ai::factory_definitions::check_authored_skill_path(
-            &skill_spec,
-            working_dir,
-            definitions,
-        )
-        .map_err(AgentDriverError::ConfigBuildFailed)?;
-        if let Some(skill) =
-            definitions.and_then(|definitions| definitions.resolve_skill(&skill_spec))
-        {
-            return Ok(Some(skill));
-        }
 
         // In sandboxed mode with a fully-qualified spec, clone the repo first.
         let needs_clone = args.sandboxed && skill_spec.org.is_some() && skill_spec.repo.is_some();
@@ -1411,7 +1480,6 @@ impl AgentDriverRunner {
         args: &RunAgentArgs,
         config: &ExecutionConfiguration,
         working_dir: &Path,
-        definitions: Option<&crate::ai::factory_definitions::ActivatedDefinitions>,
         setup_events: &SetupClientEventReporter,
     ) -> Result<(Option<ResolvedSkill>, Vec<PathBuf>), AgentDriverError> {
         if !config.skills.is_empty() && !FeatureFlag::OzPlatformSkills.is_enabled() {
@@ -1427,15 +1495,9 @@ impl AgentDriverRunner {
                 .map_err(|error: String| AgentDriverError::SkillResolutionFailed(error))?;
             let mut skill_args = args.clone();
             skill_args.skill = Some(spec);
-            let skill = Self::resolve_skill(
-                foreground,
-                &skill_args,
-                working_dir,
-                definitions,
-                setup_events,
-            )
-            .await?
-            .ok_or(AgentDriverError::InvalidRuntimeState)?;
+            let skill = Self::resolve_skill(foreground, &skill_args, working_dir, setup_events)
+                .await?
+                .ok_or(AgentDriverError::InvalidRuntimeState)?;
             resolved.push(skill);
         }
         selected_execution_skills(resolved)
@@ -1454,7 +1516,6 @@ impl AgentDriverRunner {
         server_api: &Arc<dyn AIClient>,
         setup_events: &SetupClientEventReporter,
         execution_data: Option<ExecutionTaskData>,
-        factory_child_config: Option<FactoryExecutionDefinitions>,
     ) -> Result<(AgentDriverOptions, Task, Option<String>), AgentDriverError> {
         // Get the working directory
         let working_dir = match args.cwd.as_ref() {
@@ -1464,26 +1525,7 @@ impl AgentDriverRunner {
         }
         .map_err(AgentDriverError::ConfigBuildFailed)?;
 
-        let factory_branch =
-            std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty());
-        let has_branch_config = execution_data
-            .as_ref()
-            .is_some_and(|data| data.config.factory_branch.is_some())
-            || factory_child_config.is_some();
-        if (factory_branch || has_branch_config)
-            && (args.gui
-                || args.task_id.is_none()
-                || args.execution_id.is_none()
-                || !warp_isolation_platform::workload_token_available())
-        {
-            return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
-                "Factory branches require a headless cloud task workload"
-            )));
-        }
-        let factory_descendant = factory_child_config.is_some();
-        if let Some(task_id_str) = args.task_id.as_ref()
-            && !factory_descendant
-        {
+        if let Some(task_id_str) = args.task_id.as_ref() {
             Self::bootstrap_git_credentials_for_task(
                 foreground,
                 task_id_str,
@@ -1502,28 +1544,22 @@ impl AgentDriverRunner {
             attachments,
         }) = execution_data
         {
-            if factory_branch && config.factory_branch.is_none() {
-                return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
-                    "Factory execution configuration has no selected definitions"
-                )));
-            }
-            let definitions = crate::ai::factory_definitions::prepare_from_config(
-                &working_dir,
-                config.execution_id.inner(),
-                config.factory_branch.as_ref(),
-                &config.factory_skill_dirs,
-            )
-            .await
-            .map_err(AgentDriverError::ConfigBuildFailed)?;
+            let mut factory_skill_dirs = prepare_execution_factory_skill_dirs(&config)
+                .await
+                .map_err(AgentDriverError::ConfigBuildFailed)?;
             let (first_skill, skill_discovery_dirs) = Self::resolve_execution_skills(
                 foreground,
                 &args,
                 &config,
                 &working_dir,
-                definitions.as_ref(),
                 setup_events,
             )
             .await?;
+            for dir in skill_discovery_dirs {
+                if !factory_skill_dirs.contains(&dir) {
+                    factory_skill_dirs.push(dir);
+                }
+            }
             let (mut options, mut task, conversation_id, providers) = foreground
                 .spawn(move |_, ctx| {
                     build_execution_task_and_options(
@@ -1532,25 +1568,13 @@ impl AgentDriverRunner {
                         use_factory_repositories,
                         working_dir,
                         first_skill,
-                        skill_discovery_dirs,
+                        factory_skill_dirs,
                         ctx,
                     )
                 })
                 .await?
                 .map_err(AgentDriverError::ConfigBuildFailed)?;
             options.team_scope = agent_driver_team_scope;
-            if let Some(definitions) = definitions {
-                let mut dirs = definitions.skill_dirs.clone();
-                dirs.extend(
-                    options
-                        .workspace
-                        .factory_skill_dirs
-                        .take()
-                        .unwrap_or_default(),
-                );
-                options.workspace.factory_skill_dirs = Some(dirs);
-                options.workspace.factory_definitions = Some(definitions);
-            }
             let task_id = options
                 .task_id
                 .ok_or(AgentDriverError::InvalidRuntimeState)?;
@@ -1580,31 +1604,9 @@ impl AgentDriverRunner {
             }
             return Ok((options, task, conversation_id));
         }
-        let definitions = if let Some(config) = factory_child_config {
-            let branch = config
-                .factory_branch
-                .context("Factory child configuration has no selected definitions")
-                .map_err(AgentDriverError::ConfigBuildFailed)?;
-            crate::ai::factory_definitions::prepare_from_config(
-                &working_dir,
-                config.execution_id.inner(),
-                Some(&branch),
-                &config.factory_skill_dirs,
-            )
-            .await
-            .map_err(AgentDriverError::ConfigBuildFailed)?
-        } else {
-            None
-        };
         // Resolve the skill, if we have one
-        let resolved_skill = Self::resolve_skill(
-            foreground,
-            &args,
-            &working_dir,
-            definitions.as_ref(),
-            setup_events,
-        )
-        .await?;
+        let resolved_skill =
+            Self::resolve_skill(foreground, &args, &working_dir, setup_events).await?;
 
         // Extract variables we want to use later before moving args into the closure
         let task_id_str = args.task_id.clone();
@@ -1692,49 +1694,18 @@ impl AgentDriverRunner {
         let (task_conversation_id, additional_source_repos) = if let Some(task_id_str) = task_id_str
         {
             driver_options.team_scope = agent_driver_team_scope;
-            if factory_descendant {
-                let task_id = driver_options
-                    .task_id
-                    .ok_or(AgentDriverError::InvalidRuntimeState)?;
-                Self::set_ambient_agent_task_id(foreground, Some(task_id)).await?;
-                let metadata = server_api
-                    .get_ambient_agent_task(&task_id)
-                    .await
-                    .map_err(AgentDriverError::TaskMetadataFetchFailed)?;
-                driver_options.parent_run_id = metadata.parent_run_id;
-                if let Some(scope) = metadata.scope.as_ref() {
-                    driver_options.team_scope = Some(HeadlessTeamScope::from_task_scope(scope));
-                }
-                if let Some(config) = metadata.agent_config_snapshot {
-                    driver_options.experimental = config.experimental;
-                    if let Some(harness) = config.harness {
-                        task.harness = reconcile_task_harness(
-                            &task_id_str,
-                            &mut driver_options.selected_harness,
-                            harness.harness_type,
-                            driver_options.harness_transport,
-                        )?;
-                        if driver_options.third_party_harness_model_config.is_none() {
-                            driver_options.third_party_harness_model_config =
-                                harness.model_config();
-                        }
-                    }
-                }
-                (metadata.conversation_id, Vec::new())
-            } else {
-                setup_events
-                    .record_result(
-                        SetupStep::TaskDataFetch,
-                        Self::fetch_secrets_and_attachments(
-                            foreground,
-                            server_api,
-                            task_id_str,
-                            &mut driver_options,
-                            &mut task,
-                        ),
-                    )
-                    .await?
-            }
+            setup_events
+                .record_result(
+                    SetupStep::TaskDataFetch,
+                    Self::fetch_secrets_and_attachments(
+                        foreground,
+                        server_api,
+                        task_id_str,
+                        &mut driver_options,
+                        &mut task,
+                    ),
+                )
+                .await?
         } else {
             // Extract the prompt text that we'll pass up to the server when we create the task.
             let prompt_for_task_creation = match &prompt {
@@ -1759,11 +1730,6 @@ impl AgentDriverRunner {
             .await?;
             (None, Vec::new())
         };
-        if let Some(definitions) = definitions {
-            driver_options.workspace.factory_skill_dirs = Some(definitions.skill_dirs.clone());
-            driver_options.workspace.factory_definitions = Some(definitions);
-            return Ok((driver_options, task, task_conversation_id));
-        }
         // Resolve environment and cloud providers.
         let environment = setup_events
             .record_result(

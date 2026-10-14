@@ -56,7 +56,6 @@ struct PendingStartAgent {
 pub struct StartAgentExecutor {
     pending: HashMap<StartAgentRequestId, PendingStartAgent>,
     next_request_id: u64,
-    factory_branch_active: bool,
 }
 
 impl StartAgentExecutor {
@@ -67,12 +66,7 @@ impl StartAgentExecutor {
         Self {
             pending: HashMap::new(),
             next_request_id: 0,
-            factory_branch_active: false,
         }
-    }
-
-    pub fn set_factory_branch_active(&mut self, active: bool) {
-        self.factory_branch_active = active;
     }
 
     fn next_request_id(&mut self) -> StartAgentRequestId {
@@ -267,15 +261,6 @@ impl StartAgentExecutor {
         ctx: &mut ModelContext<Self>,
     ) -> async_channel::Receiver<StartAgentOutcome> {
         let (sender, receiver) = async_channel::bounded(1);
-        if self.factory_branch_active
-            && matches!(execution_mode, StartAgentExecutionMode::Local { .. })
-        {
-            let _ = sender.try_send(StartAgentOutcome::Error(
-                "Factory branch children require a headless AgentDriver launch or remote execution."
-                    .to_string(),
-            ));
-            return receiver;
-        }
         let request_id = self.next_request_id();
         self.pending.insert(
             request_id,
@@ -366,7 +351,3 @@ pub enum StartAgentExecutorEvent {
         conversation_id: AIConversationId,
     },
 }
-
-#[cfg(test)]
-#[path = "start_agent_tests.rs"]
-mod tests;

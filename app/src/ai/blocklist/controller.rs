@@ -356,8 +356,6 @@ pub struct BlocklistAIController {
     /// conversation, because the ambient agent task driver owns the entire Warp window working on a task, and any
     /// sessions within it. In the future, one task may span several sessions with background processes.
     ambient_agent_task_id: Option<AmbientAgentTaskId>,
-    #[cfg(not(target_family = "wasm"))]
-    factory_definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
 
     /// Per-session directory for downloading file attachments.
     /// Set by the agent driver based on the workspace directory (e.g. `{working_dir}/.warp/attachments`).
@@ -724,8 +722,6 @@ impl BlocklistAIController {
             native_prompt_conversation_id: None,
             external_harness_prompt_sink: None,
             ambient_agent_task_id: None,
-            #[cfg(not(target_family = "wasm"))]
-            factory_definitions: None,
             attachments_download_dir: None,
             pending_auto_resume_handles: HashMap::new(),
             pending_local_claude_wakes: HashMap::new(),
@@ -2914,26 +2910,6 @@ impl BlocklistAIController {
         self.ambient_agent_task_id
     }
 
-    #[cfg(not(target_family = "wasm"))]
-    pub fn set_factory_definitions(
-        &mut self,
-        definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        if let Some(definitions) = &definitions {
-            crate::ai::skills::SkillManager::handle(ctx).update(ctx, |manager, _| {
-                manager.cache_definition_skills(definitions.skills.clone());
-            });
-        }
-        self.action_model
-            .as_ref(ctx)
-            .start_agent_executor(ctx)
-            .update(ctx, |executor, _| {
-                executor.set_factory_branch_active(definitions.is_some());
-            });
-        self.factory_definitions = definitions;
-    }
-
     /// Set the per-session directory for downloading file attachments.
     pub fn set_attachments_download_dir(&mut self, dir: std::path::PathBuf) {
         self.attachments_download_dir = Some(dir);
@@ -3112,10 +3088,6 @@ impl BlocklistAIController {
         );
         request_params.parent_agent_id = parent_agent_id;
         request_params.agent_name = agent_name;
-        #[cfg(not(target_family = "wasm"))]
-        if let Some(definitions) = &self.factory_definitions {
-            definitions.add_skill_context(&mut request_params.input);
-        }
 
         let server_conversation_token_for_identifiers =
             conversation_data.server_conversation_token.clone();

@@ -4,62 +4,6 @@ use crate::ai::AgentHarness;
 use crate::error::UserFacingError;
 use crate::request_context::RequestContext;
 use crate::schema;
-#[derive(cynic::QueryVariables, Debug)]
-pub struct FactoryExecutionConfigVariables {
-    pub execution_id: cynic::Id,
-    pub task_input: TaskInput,
-    pub request_context: RequestContext,
-}
-
-#[derive(cynic::QueryFragment, Debug)]
-#[cynic(
-    graphql_type = "RootQuery",
-    variables = "FactoryExecutionConfigVariables"
-)]
-pub struct FactoryExecutionConfig {
-    #[arguments(input: $task_input, requestContext: $request_context)]
-    pub task: FactoryExecutionTaskResult,
-}
-crate::client::define_operation! {
-    factory_execution_config(FactoryExecutionConfigVariables) -> FactoryExecutionConfig;
-}
-
-#[derive(cynic::InlineFragments, Debug)]
-#[cynic(
-    graphql_type = "TaskResult",
-    variables = "FactoryExecutionConfigVariables"
-)]
-pub enum FactoryExecutionTaskResult {
-    TaskOutput(FactoryExecutionTaskOutput),
-    UserFacingError(UserFacingError),
-    #[cynic(fallback)]
-    Unknown,
-}
-
-#[derive(cynic::QueryFragment, Debug)]
-#[cynic(
-    graphql_type = "TaskOutput",
-    variables = "FactoryExecutionConfigVariables"
-)]
-pub struct FactoryExecutionTaskOutput {
-    pub task: FactoryExecutionTask,
-}
-
-#[derive(cynic::QueryFragment, Debug)]
-#[cynic(graphql_type = "Task", variables = "FactoryExecutionConfigVariables")]
-pub struct FactoryExecutionTask {
-    #[arguments(executionId: $execution_id)]
-    pub execution_config: FactoryExecutionDefinitions,
-}
-
-#[derive(cynic::QueryFragment, Debug)]
-#[cynic(graphql_type = "ExecutionConfiguration")]
-pub struct FactoryExecutionDefinitions {
-    pub execution_id: cynic::Id,
-    pub parent_run_id: Option<cynic::Id>,
-    pub factory_skill_dirs: Vec<String>,
-    pub factory_branch: Option<FactoryBranchExecutionConfig>,
-}
 
 #[derive(cynic::QueryVariables, Debug)]
 pub struct ExecutionBootstrapVariables {
@@ -69,7 +13,7 @@ pub struct ExecutionBootstrapVariables {
     pub task_input: TaskInput,
     pub request_context: RequestContext,
 }
-#[derive(cynic::QueryFragment, Clone, Debug)]
+#[derive(cynic::QueryFragment, Debug)]
 pub struct FactoryBranchExecutionConfig {
     pub factory_id: cynic::Id,
     pub branch_id: cynic::Id,

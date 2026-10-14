@@ -165,41 +165,6 @@ fn get_skills_for_working_directory_scopes_subdirectory_skills() {
 }
 
 #[test]
-fn factory_branch_skills_are_path_cached_but_never_registered_as_home_skills() {
-    App::test((), |mut app| async move {
-        app.add_singleton_model(DirectoryWatcher::new);
-        app.add_singleton_model(AISettings::new_with_defaults);
-        app.add_singleton_model(|_| DetectedRepositories::default());
-        app.add_singleton_model(RepoMetadataModel::new);
-        app.add_singleton_model(HomeDirectoryWatcher::new_for_test);
-        app.add_singleton_model(WarpManagedPathsWatcher::new_for_testing);
-        let handle = app.add_singleton_model(SkillManager::new);
-        let path =
-            LocalOrRemotePath::Local(Path::new("/tmp").join(
-                ".warp/factory-definitions/preview/sha/setup/.agents/skills/example/SKILL.md",
-            ));
-        let skill = ParsedSkill {
-            name: "example".into(),
-            description: "Selected definitions".into(),
-            path: path.clone(),
-            content: "Read the selected immutable tree.".into(),
-            line_range: None,
-            provider: SkillProvider::Agents,
-            scope: SkillScope::Home,
-        };
-        handle.update(&mut app, |manager, _| {
-            manager.handle_skills_added(vec![skill.clone()]);
-            manager.add_skills_dirs_skills(vec![skill.clone()]);
-            assert!(manager.skills_by_path.is_empty());
-            manager.cache_definition_skills(vec![skill]);
-            assert!(manager.skill_by_path(&path).is_some());
-            assert!(manager.skills_by_name.is_empty());
-            assert!(manager.directory_skills.is_empty());
-        });
-    });
-}
-
-#[test]
 fn remote_home_provider_variants_are_available_for_provider_selection() {
     let host_id = HostId::new("remote-host".to_string());
     let agents_skill = make_remote_home_skill(&host_id, "deploy", "shared content");

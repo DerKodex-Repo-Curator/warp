@@ -1265,12 +1265,6 @@ pub struct UpdateMemoryResponse {
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 pub trait AIClient: 'static + Send + Sync {
-    #[cfg(not(target_family = "wasm"))]
-    async fn get_factory_definition_config(
-        &self,
-        task_id: &str,
-        execution_id: &str,
-    ) -> anyhow::Result<warp_graphql::queries::execution_config::FactoryExecutionDefinitions>;
     async fn generate_commands_from_natural_language(
         &self,
         prompt: String,
@@ -2018,37 +2012,6 @@ fn convert_upload_field(
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl AIClient for ServerApi {
-    #[cfg(not(target_family = "wasm"))]
-    async fn get_factory_definition_config(
-        &self,
-        task_id: &str,
-        execution_id: &str,
-    ) -> anyhow::Result<warp_graphql::queries::execution_config::FactoryExecutionDefinitions> {
-        use warp_graphql::queries::execution_config::{
-            FactoryExecutionConfig, FactoryExecutionConfigVariables, FactoryExecutionTaskResult,
-        };
-        let response = self
-            .send_graphql_request(
-                FactoryExecutionConfig::build(FactoryExecutionConfigVariables {
-                    execution_id: cynic::Id::new(execution_id),
-                    task_input: TaskInput {
-                        task_id: cynic::Id::new(task_id),
-                    },
-                    request_context: get_request_context(),
-                }),
-                None,
-            )
-            .await?;
-        match response.task {
-            FactoryExecutionTaskResult::TaskOutput(output) => Ok(output.task.execution_config),
-            FactoryExecutionTaskResult::UserFacingError(error) => {
-                Err(anyhow!(get_user_facing_error_message(error)))
-            }
-            FactoryExecutionTaskResult::Unknown => {
-                Err(anyhow!("Unknown execution config task response"))
-            }
-        }
-    }
     async fn generate_commands_from_natural_language(
         &self,
         prompt: String,

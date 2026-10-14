@@ -120,7 +120,7 @@ pub(crate) mod environment;
 pub(crate) mod environment_checkout;
 mod environment_checkout_protocol;
 mod error_classification;
-pub(crate) mod failure_output;
+mod failure_output;
 pub(crate) mod git_credentials;
 pub(crate) mod harness;
 mod harness_output_monitor;
@@ -1238,9 +1238,6 @@ impl AgentDriver {
         }
         let has_deferred_repositories =
             use_factory_repositories && !workspace.deferred_repos.is_empty();
-        if let Some(definitions) = &workspace.factory_definitions {
-            env_vars.extend(definitions.env_vars());
-        }
         if let Err(error) = git_credentials::prepend_azure_cli_wrapper_to_path(&mut env_vars) {
             safe_warn!(
                 safe: ("Failed to add the Azure CLI authentication wrapper to PATH"),
@@ -1273,14 +1270,6 @@ impl AgentDriver {
             ctx,
         )?;
         let computer_use_configured = computer_use_config.is_some();
-        if let Some(definitions) = &workspace.factory_definitions {
-            let terminal_view = terminal_driver.as_ref(ctx).terminal_view().clone();
-            terminal_view.update(ctx, |terminal, ctx| {
-                terminal.ai_controller().update(ctx, |controller, ctx| {
-                    controller.set_factory_definitions(Some(definitions.clone()), ctx);
-                });
-            });
-        }
         if let Some((enabled, model_id)) = computer_use_config {
             let terminal_view_id = terminal_driver.as_ref(ctx).terminal_view().id();
             AIExecutionProfilesModel::handle(ctx).update(ctx, |profiles, ctx| {
@@ -2203,10 +2192,7 @@ impl AgentDriver {
         );
         let load_result = foreground
             .spawn(move |me, ctx| {
-                let dirs = resolve_skills_dirs(&me.working_dir, dirs)
-                    .into_iter()
-                    .filter(|dir| !crate::ai::factory_definitions::is_definition_path(dir))
-                    .collect::<Vec<_>>();
+                let dirs = resolve_skills_dirs(&me.working_dir, dirs);
                 let skills = read_skills_for_skills_dirs(&dirs);
                 if skills.is_empty() {
                     log::info!("WARP_SKILL_DIRS: no skills found");
@@ -2394,7 +2380,6 @@ impl AgentDriver {
                 })
                 .await?;
             let mut workspace = workspace.ok_or(AgentDriverError::InvalidRuntimeState)?;
-            let has_definition_checkout = workspace.factory_definitions.is_some();
             let source_repos = workspace.source_repos.clone();
             if has_deferred_repositories {
                 let executable = std::env::current_exe()
@@ -2412,12 +2397,10 @@ impl AgentDriver {
             // The Factory definition checkout is run-scoped: the dispatch decides
             // whether this run gets one by attaching the clone variables,
             // independent of which environment the run executes in.
-            if workspace.factory_definitions.is_none() {
-                environment::prepend_factory_definition_clone(
-                    &mut workspace.setup_commands,
-                    session_shell_type,
-                );
-            }
+            environment::prepend_factory_definition_clone(
+                &mut workspace.setup_commands,
+                session_shell_type,
+            );
 
             if workspace.has_environment
                 || !source_repos.is_empty()
@@ -2541,14 +2524,12 @@ impl AgentDriver {
                         ),
                     )
                     .await;
-                if !has_definition_checkout {
-                    setup_events
-                        .record_value(
-                            SetupStep::SkillsDirsLoading,
-                            Self::load_skills_dirs(&foreground),
-                        )
-                        .await;
-                }
+                setup_events
+                    .record_value(
+                        SetupStep::SkillsDirsLoading,
+                        Self::load_skills_dirs(&foreground),
+                    )
+                    .await;
                 if has_deferred_repositories {
                     Self::load_factory_deferred_repositories_skill(&foreground).await;
                 }

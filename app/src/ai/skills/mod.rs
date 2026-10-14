@@ -91,8 +91,6 @@ impl SkillPathQuery for PathBuf {
 #[cfg(not(target_family = "wasm"))]
 mod resolve_skill_spec;
 #[cfg(not(target_family = "wasm"))]
-pub(crate) use resolve_skill_spec::to_resolved_skill;
-#[cfg(not(target_family = "wasm"))]
 pub use resolve_skill_spec::{
     ResolveSkillError, ResolvedSkill, clone_repo_for_skill, resolve_skill_spec,
 };

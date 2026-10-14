@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -33,7 +34,7 @@ use crate::ai::ambient_agents::task::{
     AmbientAgentTask, AmbientAgentTaskState, TaskAttachment, TaskScope,
 };
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
-use crate::ai::skills::ResolvedSkill;
+use crate::ai::skills::{ResolvedSkill, SkillManager};
 use crate::auth::AuthStateProvider;
 use crate::auth::user::{PrincipalType, User};
 use crate::network::NetworkStatus;
@@ -51,218 +52,112 @@ use crate::workspaces::user_workspaces::{HeadlessTeamScope, TeamScope, UserWorks
 use crate::workspaces::workspace::{Workspace, WorkspaceUid};
 
 const TASK_ID: &str = "00000000-0000-0000-0000-000000000001";
-
-#[test]
-fn factory_branch_driver_rejects_interactive_and_unbound_launches() {
-    use warp_graphql::queries::execution_config::{
-        FactoryBranchExecutionConfig, FactoryExecutionDefinitions,
-    };
-    if std::env::var_os("WARP_SDK_FACTORY_GATE_FIXTURE").is_none() {
-        let output = ProcessCommand::new(std::env::current_exe().unwrap())
-            .args(["--exact", "ai::agent_sdk::tests::factory_branch_driver_rejects_interactive_and_unbound_launches"])
-            .env("WARP_SDK_FACTORY_GATE_FIXTURE", "1")
-            .env("WARP_ISOLATION_PLATFORM", "docker")
-            .env("WARP_WORKLOAD_TOKEN", "test-workload-token")
-            .env_remove("WARP_EXECUTION_ID")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    }
-
-    App::test((), |mut app| async move {
-        app.add_singleton_model(|_| ServerApiProvider::new_for_test());
-        let runner = app.add_singleton_model(|_| AgentDriverRunner);
-        let foreground = runner.update(&mut app, |_, ctx| ctx.spawner());
-        let client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
-        let events = runner.update(&mut app, |_, ctx| {
-            super::SetupClientEventReporter::noop(client.clone(), ctx.background_executor())
-        });
-        let root = tempfile::tempdir().unwrap();
-        for arguments in [
-            vec![
-                "agent",
-                "run",
-                "--gui",
-                "--task-id",
-                TASK_ID,
-                "--execution-id",
-                "42",
-            ],
-            vec!["agent", "run", "--task-id", TASK_ID],
-        ] {
-            let mut args = parse_run_agent_args(&arguments);
-            args.cwd = Some(root.path().into());
-            let config = FactoryExecutionDefinitions {
-                execution_id: cynic::Id::new("42"),
-                parent_run_id: Some(cynic::Id::new("parent")),
-                factory_skill_dirs: vec![],
-                factory_branch: Some(FactoryBranchExecutionConfig {
-                    factory_id: cynic::Id::new("factory"),
-                    branch_id: cynic::Id::new("branch"),
-                    branch: "feature".into(),
-                    source_sha: "a".repeat(40),
-                    repository_url: "https://fixture.invalid/definitions".into(),
-                }),
-            };
-            let result = AgentDriverRunner::build_driver_options_and_task(
-                &foreground,
-                args,
-                None,
-                &client,
-                &events,
-                None,
-                Some(config),
-            )
-            .await;
-            assert!(matches!(
-                result,
-                Err(AgentDriverError::ConfigBuildFailed(error))
-                    if error.to_string() == "Factory branches require a headless cloud task workload"
-            ));
-        }
-        assert!(!root.path().join(".warp").exists());
-    });
+fn factory_test_git(root: &Path, args: &[&str]) -> String {
+    let output = ProcessCommand::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 #[test]
-fn factory_branch_sdk_child_activates_definitions_without_remote_bootstrap() {
-    use git2::{Repository, Signature};
-    use warp_graphql::queries::execution_config::{
-        FactoryBranchExecutionConfig, FactoryExecutionDefinitions,
-    };
-
-    let Ok(root) = std::env::var("WARP_SDK_FACTORY_FIXTURE") else {
-        let root = tempfile::tempdir().unwrap();
-        let repository = Repository::init(root.path().join("source")).unwrap();
-        let tree = repository
-            .find_tree(repository.index().unwrap().write_tree().unwrap())
-            .unwrap();
-        let signature = Signature::now("Fixture", "fixture@example.invalid").unwrap();
-        repository
-            .commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                "Definitions",
-                &tree,
-                &[],
-            )
-            .unwrap();
-        fs::create_dir(root.path().join("working")).unwrap();
-        let source = url::Url::from_directory_path(repository.workdir().unwrap()).unwrap();
-        let output = ProcessCommand::new(std::env::current_exe().unwrap())
-            .args(["--exact", "ai::agent_sdk::tests::factory_branch_sdk_child_activates_definitions_without_remote_bootstrap", "--nocapture"])
-            .env("WARP_SDK_FACTORY_FIXTURE", root.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", root.path().join("empty-config"))
-            .env("GIT_CONFIG_COUNT", "2")
-            .env("GIT_CONFIG_KEY_0", format!("url.{source}.insteadOf"))
-            .env("GIT_CONFIG_VALUE_0", "https://fixture.invalid/definitions")
-            .env("GIT_CONFIG_KEY_1", "protocol.file.allow")
-            .env("GIT_CONFIG_VALUE_1", "always")
-            .env("WARP_ISOLATION_PLATFORM", "docker")
-            .env("WARP_WORKLOAD_TOKEN", "test-workload-token")
-            .output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    };
-    let root = std::path::PathBuf::from(root);
-    let repository = Repository::open(root.join("source")).unwrap();
-    let source_sha = repository.head().unwrap().target().unwrap().to_string();
-    App::test((), |mut app| async move {
-        let _refresh = FeatureFlag::GitCredentialRefresh.override_enabled(true);
-        let _handoff = FeatureFlag::OzHandoff.override_enabled(false);
-        app.add_singleton_model(|_| ServerApiProvider::new_for_test());
-        let runner = app.add_singleton_model(|_| AgentDriverRunner);
-        let foreground = runner.update(&mut app, |_, ctx| ctx.spawner());
-        let now = Utc::now();
-        let metadata = AmbientAgentTask {
-            task_id: TASK_ID.parse().unwrap(),
-            parent_run_id: Some("parent".into()),
-            title: String::new(),
-            state: AmbientAgentTaskState::InProgress,
-            prompt: String::new(),
-            created_at: now,
-            started_at: None,
-            updated_at: now,
-            run_time: None,
-            status_message: None,
-            source: None,
-            execution_location: None,
-            session_id: None,
-            session_link: None,
-            creator: None,
-            executor: None,
-            conversation_id: None,
-            request_usage: None,
-            is_sandbox_running: false,
-            agent_config_snapshot: None,
-            artifacts: vec![],
-            last_event_sequence: None,
-            children: vec![],
-            debug_agent_available: false,
-            scope: None,
-        };
-        let mut client = MockAIClient::new();
-        client
-            .expect_get_ambient_agent_task()
-            .times(1)
-            .return_once(move |_| Ok(metadata));
-        client.expect_get_task_git_credentials().times(0);
-        client.expect_get_task_attachments().times(0);
-        let client: Arc<dyn AIClient> = Arc::new(client);
-        let events = runner.update(&mut app, |_, ctx| {
-            super::SetupClientEventReporter::noop(client.clone(), ctx.background_executor())
-        });
-        let mut args =
-            parse_run_agent_args(&["agent", "run", "--task-id", TASK_ID, "--execution-id", "42"]);
-        args.cwd = Some(root.join("working"));
-        args.environment = Some("must-not-bootstrap".into());
-        let config = FactoryExecutionDefinitions {
-            execution_id: cynic::Id::new("42"),
-            parent_run_id: Some(cynic::Id::new("parent")),
-            factory_skill_dirs: vec!["skills".into()],
-            factory_branch: Some(FactoryBranchExecutionConfig {
-                factory_id: cynic::Id::new("factory"),
-                branch_id: cynic::Id::new("branch"),
-                branch: "feature".into(),
-                source_sha,
-                repository_url: "https://fixture.invalid/definitions".into(),
-            }),
-        };
-        let (options, _, _) = AgentDriverRunner::build_driver_options_and_task(
-            &foreground,
-            args,
-            None,
-            &client,
-            &events,
-            None,
-            Some(config),
+fn factory_branch_bootstrap_keeps_definitions_separate_from_working_head() {
+    let root = tempfile::TempDir::new().unwrap();
+    let source = root.path().join("source");
+    fs::create_dir(&source).unwrap();
+    factory_test_git(&source, &["init", "--quiet"]);
+    factory_test_git(
+        &source,
+        &["remote", "add", "origin", "https://example.com/work.git"],
+    );
+    for (dir, name) in [("agents/worker/skills", "worker"), ("skills", "shared")] {
+        let skill = source.join(dir).join(name).join("SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(
+            skill,
+            format!("---\nname: {name}\ndescription: example\n---\nSelected instructions"),
         )
-        .await
         .unwrap();
-        assert_eq!(options.task_id.unwrap().to_string(), TASK_ID);
-        assert_eq!(options.parent_run_id.as_deref(), Some("parent"));
-        assert!(options.secrets.is_empty());
-        assert!(options.workspace.source_repos.is_empty());
-        let definitions = options.workspace.factory_definitions.unwrap();
-        assert_eq!(definitions.execution_id, "42");
-        assert_eq!(
-            options.workspace.factory_skill_dirs.unwrap(),
-            definitions.skill_dirs
-        );
-    });
+    }
+    factory_test_git(&source, &["add", "."]);
+    factory_test_git(
+        &source,
+        &["commit", "--quiet", "-m", "Selected definitions"],
+    );
+    let sha = factory_test_git(&source, &["rev-parse", "HEAD"]);
+    #[cfg(unix)]
+    let escaping_sha = {
+        std::os::unix::fs::symlink(root.path(), source.join("escape")).unwrap();
+        factory_test_git(&source, &["add", "escape"]);
+        factory_test_git(&source, &["commit", "--quiet", "-m", "Escaping symlink"]);
+        let sha = factory_test_git(&source, &["rev-parse", "HEAD"]);
+        factory_test_git(&source, &["rm", "--quiet", "escape"]);
+        sha
+    };
+    fs::write(
+        source.join("skills/shared/SKILL.md"),
+        "---\nname: shared\ndescription: example\n---\nWorking instructions",
+    )
+    .unwrap();
+    factory_test_git(
+        &source,
+        &["commit", "--quiet", "-am", "Working definitions"],
+    );
+    let working_head = factory_test_git(&source, &["rev-parse", "HEAD"]);
+    let explicit = source.join("explicit/skills/explicit/SKILL.md");
+    fs::create_dir_all(explicit.parent().unwrap()).unwrap();
+    fs::write(
+        &explicit,
+        "---\nname: explicit\ndescription: example\n---\nExplicit instructions",
+    )
+    .unwrap();
+    let git_config = root.path().join("gitconfig");
+    fs::write(
+        &git_config,
+        format!(
+            "[url \"{}\"]\n\tinsteadOf = https://example.com/definitions.git\n",
+            source.display()
+        ),
+    )
+    .unwrap();
+    let mut child = ProcessCommand::new(std::env::current_exe().unwrap());
+    #[cfg(unix)]
+    child.env("WARP_TEST_FACTORY_ESCAPING_SHA", escaping_sha);
+    let output = child
+        .args([
+            "--exact",
+            "ai::agent_sdk::tests::deferred_capability_bootstrap_subprocess",
+            "--nocapture",
+        ])
+        .env("WARP_TEST_DEFERRED_CAPABILITY_SCENARIO", "branch")
+        .env("WARP_TEST_FACTORY_SOURCE", &source)
+        .env("WARP_TEST_FACTORY_SHA", sha)
+        .env("WARP_TEST_FACTORY_WORKING_HEAD", &working_head)
+        .env("WARP_ISOLATION_PLATFORM", "docker")
+        .env("WARP_WORKLOAD_TOKEN", "test-workload-token")
+        .env("GIT_CONFIG_GLOBAL", git_config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        factory_test_git(&source, &["rev-parse", "HEAD"]),
+        working_head
+    );
+    assert_eq!(
+        factory_test_git(&source, &["remote", "get-url", "origin"]),
+        "https://example.com/work.git"
+    );
 }
 
 #[test]
@@ -288,7 +183,7 @@ fn paired_execution_launch_keeps_inventory_separate_from_eager_membership() {
                 "reasoningLevel": null, "profileId": null, "computerUseModelId": null,
                 "inferenceProviders": null, "providers": null,
                 "idleOnCompleteSeconds": null, "idleOnFailSeconds": null,
-                "mcpServersJson": "{}", "skills": [], "factorySkillDirs": [],
+                "mcpServersJson": "{}", "skills": [], "factorySkillDirs": [], "factoryBranch": null,
                 "computerUseEnabled": false, "repositories": eager,
                 "deferredRepositories": [{
                     "codeForge": deferred_forge, "owner": "platform/backend", "repo": "api",
@@ -380,18 +275,29 @@ fn deferred_capability_bootstrap_subprocess() {
     } else {
         json!([])
     };
-    let config = json!({
+    let mut config = json!({
         "taskId": TASK_ID, "executionId": "42", "harness": "OZ",
         "conversationId": null, "parentRunId": null, "teamId": null, "modelId": null,
         "reasoningLevel": null, "profileId": null, "computerUseModelId": null,
         "inferenceProviders": null, "providers": null,
         "idleOnCompleteSeconds": null, "idleOnFailSeconds": null,
-        "mcpServersJson": "{}", "skills": [], "factorySkillDirs": [],
+        "mcpServersJson": "{}", "skills": [], "factorySkillDirs": [], "factoryBranch": null,
         "computerUseEnabled": false, "repositories": eager,
         "deferredRepositories": deferred,
         "setupCommands": [], "sessionSharingAcls": [],
         "skipInitialTurn": false, "snapshotDisabled": false,
     });
+    let branch_source = (scenario == "branch")
+        .then(|| PathBuf::from(std::env::var("WARP_TEST_FACTORY_SOURCE").unwrap()));
+    if branch_source.is_some() {
+        config["factoryBranch"] = json!({
+            "factoryId": "factory", "branchId": "branch", "branch": "selected",
+            "sourceSha": std::env::var("WARP_TEST_FACTORY_SHA").unwrap(),
+            "repositoryUrl": "https://example.com/definitions.git",
+        });
+        config["factorySkillDirs"] = json!(["agents/worker/skills", "skills", "missing"]);
+        config["skills"] = json!([{"spec": "explicit/skills/explicit/SKILL.md"}]);
+    }
     let mut server = warp_core::channel::ChannelState::mock_server();
     let bootstrap = server
         .mock("POST", "/graphql/v2")
@@ -446,6 +352,23 @@ fn deferred_capability_bootstrap_subprocess() {
     App::test((), |mut app| async move {
         let _refresh = FeatureFlag::GitCredentialRefresh.override_enabled(true);
         let _handoff = FeatureFlag::OzHandoff.override_enabled(false);
+        let _skills = FeatureFlag::OzPlatformSkills.override_enabled(true);
+        if branch_source.is_some() {
+            #[cfg(feature = "local_fs")]
+            {
+                app.add_singleton_model(repo_metadata::DirectoryWatcher::new);
+                app.add_singleton_model(crate::settings::AISettings::new_with_defaults);
+                app.add_singleton_model(|_| {
+                    repo_metadata::repositories::DetectedRepositories::default()
+                });
+                app.add_singleton_model(repo_metadata::RepoMetadataModel::new);
+                app.add_singleton_model(watcher::HomeDirectoryWatcher::new_for_test);
+                app.add_singleton_model(
+                    crate::warp_managed_paths_watcher::WarpManagedPathsWatcher::new_for_testing,
+                );
+            }
+            app.add_singleton_model(SkillManager::new);
+        }
         let capability =
             FeatureFlag::FactoryDeferredRepositories.override_enabled(use_factory_repositories);
         let provider = app.add_singleton_model(|_| ServerApiProvider::new_for_test());
@@ -467,16 +390,16 @@ fn deferred_capability_bootstrap_subprocess() {
         let events = runner.update(&mut app, |_, ctx| {
             super::SetupClientEventReporter::noop(ai_client.clone(), ctx.background_executor())
         });
-        let args =
+        let mut args =
             parse_run_agent_args(&["agent", "run", "--task-id", TASK_ID, "--execution-id", "42"]);
-        let (options, _, _) = AgentDriverRunner::build_driver_options_and_task(
+        args.cwd = branch_source.clone();
+        let (options, task, _) = AgentDriverRunner::build_driver_options_and_task(
             &foreground,
             args,
             None,
             &ai_client,
             &events,
             Some(data),
-            None,
         )
         .await
         .unwrap();
@@ -489,6 +412,112 @@ fn deferred_capability_bootstrap_subprocess() {
             options.workspace.deferred_repos.len(),
             usize::from(scenario == "deferred")
         );
+        if let Some(source) = &branch_source {
+            let dirs = options.workspace.factory_skill_dirs.unwrap();
+            let leaf = dirs[1].parent().unwrap();
+            assert_eq!(dirs[0], leaf.join("agents/worker/skills"));
+            assert_eq!(dirs[2], leaf.join("missing"));
+            assert_eq!(dirs[3], source.join("explicit/skills"));
+            assert_eq!(
+                factory_test_git(leaf, &["rev-parse", "HEAD"]),
+                config["factoryBranch"]["sourceSha"].as_str().unwrap()
+            );
+            assert!(
+                !ProcessCommand::new("git")
+                    .current_dir(leaf)
+                    .args(["symbolic-ref", "-q", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+            assert_eq!(options.working_dir, *source);
+            assert_eq!(
+                factory_test_git(source, &["rev-parse", "HEAD"]),
+                std::env::var("WARP_TEST_FACTORY_WORKING_HEAD").unwrap()
+            );
+            let resolved = ai::skills::resolve_skills_dirs(source, dirs.clone());
+            assert_eq!(resolved, dirs);
+            let loaded = ai::skills::read_skills_for_skills_dirs(&resolved);
+            assert_eq!(
+                loaded
+                    .iter()
+                    .map(|skill| skill.name.as_str())
+                    .collect::<Vec<_>>(),
+                ["worker", "shared", "explicit"]
+            );
+            assert!(loaded[1].content.contains("Selected instructions"));
+            assert!(
+                matches!(task.prompt, AgentRunPrompt::ServerSide { skill: Some(skill), .. } if skill.name == "explicit")
+            );
+
+            let mut newer = config.clone();
+            newer["factoryBranch"]["sourceSha"] =
+                json!(std::env::var("WARP_TEST_FACTORY_WORKING_HEAD").unwrap());
+            let new_dirs = super::prepare_execution_factory_skill_dirs(
+                &serde_json::from_value(newer).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_ne!(new_dirs[1], dirs[1]);
+            assert!(
+                fs::read_to_string(dirs[1].join("shared/SKILL.md"))
+                    .unwrap()
+                    .contains("Selected instructions")
+            );
+            assert!(
+                fs::read_to_string(new_dirs[1].join("shared/SKILL.md"))
+                    .unwrap()
+                    .contains("Working instructions")
+            );
+
+            for (field, invalid) in [
+                ("sourceSha", "short"),
+                (
+                    "repositoryUrl",
+                    "https://user:password@example.com/definitions.git",
+                ),
+                ("sourceSha", "0000000000000000000000000000000000000000"),
+                (
+                    "repositoryUrl",
+                    "https://example.com/definitions.git/missing",
+                ),
+            ] {
+                let mut bad = config.clone();
+                bad["factoryBranch"][field] = json!(invalid);
+                assert!(
+                    super::prepare_execution_factory_skill_dirs(
+                        &serde_json::from_value(bad).unwrap()
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+            for invalid in ["../skills", "/skills", "C:\\skills", "skills,other"] {
+                let mut bad = config.clone();
+                bad["factorySkillDirs"] = json!([invalid]);
+                assert!(
+                    super::prepare_execution_factory_skill_dirs(
+                        &serde_json::from_value(bad).unwrap()
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+            #[cfg(unix)]
+            {
+                let mut bad = config.clone();
+                bad["factoryBranch"]["sourceSha"] =
+                    json!(std::env::var("WARP_TEST_FACTORY_ESCAPING_SHA").unwrap());
+                assert!(
+                    super::prepare_execution_factory_skill_dirs(
+                        &serde_json::from_value(bad).unwrap()
+                    )
+                    .await
+                    .is_err()
+                );
+            }
+        }
     });
     bootstrap.assert();
     credentials.assert();

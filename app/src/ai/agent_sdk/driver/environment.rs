@@ -244,7 +244,6 @@ pub(crate) struct WorkspaceConfiguration {
     pub deferred_repos: Vec<SourceRepo>,
     pub setup_commands: Vec<String>,
     pub factory_skill_dirs: Option<Vec<PathBuf>>,
-    pub factory_definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
     pub has_environment: bool,
     clone_requests: Vec<RepositoryCloneRequest>,
 }
@@ -279,7 +278,6 @@ impl WorkspaceConfiguration {
             deferred_repos: Vec::new(),
             setup_commands,
             factory_skill_dirs: None,
-            factory_definitions: None,
             has_environment: environment.is_some(),
             clone_requests,
         })
@@ -299,7 +297,6 @@ impl WorkspaceConfiguration {
             deferred_repos,
             setup_commands,
             factory_skill_dirs: None,
-            factory_definitions: None,
             has_environment: false,
             clone_requests,
         })
@@ -386,7 +383,6 @@ pub(crate) fn prepare_environment(
             deferred_repos: _,
             setup_commands,
             factory_skill_dirs: _,
-            factory_definitions: _,
             clone_requests,
             has_environment: _,
         } = workspace;

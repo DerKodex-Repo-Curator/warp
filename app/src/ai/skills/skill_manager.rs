@@ -88,12 +88,6 @@ impl SkillManager {
         }
     }
 
-    pub(crate) fn cache_definition_skills(&mut self, skills: Vec<ParsedSkill>) {
-        for skill in skills {
-            self.skills_by_path.insert(skill.path.clone(), skill);
-        }
-    }
-
     /// Marks this manager as running in a cloud environment, enabling all
     /// directory skills to be in scope regardless of the current working directory.
     pub fn set_cloud_environment(&mut self, value: bool) {
@@ -563,13 +557,6 @@ impl SkillManager {
 
     pub fn handle_skills_added(&mut self, skills: Vec<ParsedSkill>) {
         for skill in skills {
-            if skill
-                .path
-                .to_local_path()
-                .is_some_and(crate::ai::factory_definitions::is_definition_path)
-            {
-                continue;
-            }
             match extract_skill_parent_directory(&skill.path) {
                 Ok(parent_dir) => {
                     self.directory_skills
@@ -609,13 +596,6 @@ impl SkillManager {
         };
         let home_dir = LocalOrRemotePath::Local(home_dir);
         for skill in skills {
-            if skill
-                .path
-                .to_local_path()
-                .is_some_and(crate::ai::factory_definitions::is_definition_path)
-            {
-                continue;
-            }
             self.directory_skills
                 .entry(home_dir.clone())
                 .or_default()
