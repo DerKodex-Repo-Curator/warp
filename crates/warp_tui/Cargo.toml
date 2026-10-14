@@ -15,22 +15,27 @@ default-run = "warp-tui-oss"
 [[bin]]
 name = "warp-tui-oss"
 path = "src/bin/oss.rs"
+test = false
 
 [[bin]]
 name = "warp-tui"
 path = "src/bin/local.rs"
+test = false
 
 [[bin]]
 name = "warp-tui-dev"
 path = "src/bin/dev.rs"
+test = false
 
 [[bin]]
 name = "warp-tui-preview"
 path = "src/bin/preview.rs"
+test = false
 
 [[bin]]
 name = "warp-tui-stable"
 path = "src/bin/stable.rs"
+test = false
 
 [dependencies]
 ai.workspace = true
