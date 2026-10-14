@@ -1,10 +1,10 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCompatibleCommands', '', Justification = 'This Windows CI diagnostic runs on PowerShell 7 with CIM and performance-counter cmdlets.')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseUsingScopeModifierInNewRunspaces', '', Justification = 'The ThreadJob script block binds its declared parameters through ArgumentList.')]
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Start', 'Collect', 'Phase', 'Stop')]
+    [ValidateSet('Run', 'Start', 'Collect', 'Phase', 'Stop')]
     [string]$Mode,
-    [Parameter(Mandatory)]
     [string]$OutputDirectory,
     [ValidateSet('compile', 'after-compile', 'unit-tests')]
     [string]$Phase = 'compile',
@@ -15,6 +15,64 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Mode -eq 'Run') {
+    if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
+        $OutputDirectory = Join-Path $env:RUNNER_TEMP "warp-windows-ci-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)/$Phase"
+    }
+    $collectorJob = $null
+    try {
+        & $PSCommandPath -Mode Start -OutputDirectory $OutputDirectory -IntervalSeconds $IntervalSeconds -MaxDurationSeconds $MaxDurationSeconds
+        if ($Phase -eq 'unit-tests') {
+            & $PSCommandPath -Mode Phase -Phase unit-tests -OutputDirectory $OutputDirectory
+        }
+        # The collector shares this step's lifetime instead of depending on an earlier shell.
+        $collectorJob = Start-ThreadJob -ArgumentList $PSCommandPath, $OutputDirectory, $IntervalSeconds, $MaxDurationSeconds -ScriptBlock {
+            param($Script, $Directory, $Interval, $Duration)
+            & $Script -Mode Collect -OutputDirectory $Directory -IntervalSeconds $Interval -MaxDurationSeconds $Duration
+        }
+    } catch {
+        Write-Warning "Windows resource collection unavailable ($($_.Exception.GetType().FullName))."
+    }
+    $commandExitCode = 1
+    try {
+        $workspaceArguments = @($env:WORKSPACE_TEST_ARGS -split '\s+' | Where-Object { $_ })
+        $arguments = @('nextest', 'run') + $workspaceArguments
+        if ($Phase -eq 'compile') {
+            $arguments += @('--no-run', '--timings')
+        } elseif ($Phase -eq 'unit-tests') {
+            $arguments += @('-E', 'not package(integration)')
+        } else {
+            throw 'Run requires compile or unit-tests phase.'
+        }
+        # Read the native status explicitly rather than turning it into a PowerShell exception.
+        $PSNativeCommandUseErrorActionPreference = $false
+        & cargo @arguments
+        $commandExitCode = $LASTEXITCODE
+    } catch {
+        if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            $commandExitCode = $LASTEXITCODE
+        }
+        Write-Warning "Cargo execution failed ($($_.Exception.GetType().FullName))."
+    } finally {
+        try {
+            if ($Phase -eq 'compile') {
+                & $PSCommandPath -Mode Phase -Phase after-compile -OutputDirectory $OutputDirectory
+            }
+            & $PSCommandPath -Mode Stop -OutputDirectory $OutputDirectory
+            if ($null -ne $collectorJob) {
+                $collectorJob | Wait-Job -Timeout 10 | Out-Null
+                if ($collectorJob.State -eq 'Running') {
+                    $collectorJob | Stop-Job
+                }
+                $collectorJob | Receive-Job -ErrorAction SilentlyContinue | Out-Null
+                $collectorJob | Remove-Job -Force
+            }
+        } catch {
+            Write-Warning "Windows resource cleanup unavailable ($($_.Exception.GetType().FullName))."
+        }
+    }
+    exit $commandExitCode
+}
 
 function Write-DiagnosticRecord {
     param([string]$File, [object]$Record)
@@ -89,17 +147,9 @@ try {
             $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'metadata.json') -Encoding utf8
             Write-DiagnosticRecord (Join-Path $OutputDirectory 'phases.jsonl') @{ utc = [DateTime]::UtcNow.ToString('o'); phase = 'compile' }
 
-            # Encoding the invocation preserves paths with spaces without collecting any environment.
-            $scriptPath = $PSCommandPath.Replace("'", "''")
-            $directory = $OutputDirectory.Replace("'", "''")
-            $invocation = "& '$scriptPath' -Mode Collect -OutputDirectory '$directory' -IntervalSeconds $IntervalSeconds -MaxDurationSeconds $MaxDurationSeconds"
-            $encodedInvocation = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($invocation))
-            $executable = (Get-Process -Id $PID).Path
-            $collector = Start-Process -FilePath $executable -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $encodedInvocation) -WorkingDirectory (Get-Location).Path -PassThru -RedirectStandardOutput (Join-Path $OutputDirectory 'collector.stdout') -RedirectStandardError (Join-Path $OutputDirectory 'collector.stderr')
-            @{ pid = $collector.Id; started_utc = $collector.StartTime.ToUniversalTime().ToString('o') } |
-                ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'collector.json') -Encoding utf8
         }
         'Collect' {
+            Set-Content -LiteralPath (Join-Path $OutputDirectory 'entered') -Value ([DateTime]::UtcNow.ToString('o')) -Encoding utf8
             $clock = [Diagnostics.Stopwatch]::StartNew()
             $lastPhase = 'compile'
             $counterPaths = @(

@@ -284,17 +284,11 @@ jobs:
         if: ${{ matrix.os == 'macos' }}
         continue-on-error: true
         run: ./script/macos/report_ci_cache_stats
-      - name: Start Windows resource measurements
-        if: ${{ matrix.os == 'windows' }}
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          ./script/windows/measure_ci_performance.ps1 -Mode Start -OutputDirectory (Join-Path $env:RUNNER_TEMP 'warp-windows-ci-${{ github.run_id }}-${{ github.run_attempt }}')
 
       - name: Compile tests
         # `--timings` makes cargo write a per-crate build timeline to
         # target/cargo-timings/cargo-timing.html without changing the build.
-        run: cargo nextest run ${{ env.WORKSPACE_TEST_ARGS }} --no-run --timings
+        run: ${{ matrix.os == 'windows' && './script/windows/measure_ci_performance.ps1 -Mode Run -Phase compile' || format('cargo nextest run {0} --no-run --timings', env.WORKSPACE_TEST_ARGS) }}
         env:
           # Attach the GitHub auth token so that requests to the GitHub API
           # don't get rate limited during compilation (e.g.: retrieving
@@ -315,37 +309,18 @@ jobs:
           path: target/cargo-timings/cargo-timing.html
           if-no-files-found: ignore
           overwrite: true
-      - name: Save Windows compile measurements
-        if: ${{ matrix.os == 'windows' && !cancelled() }}
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          ./script/windows/measure_ci_performance.ps1 -Mode Phase -Phase after-compile -OutputDirectory (Join-Path $env:RUNNER_TEMP 'warp-windows-ci-${{ github.run_id }}-${{ github.run_attempt }}')
-
-      - name: Mark Windows unit-test measurements
-        if: ${{ matrix.os == 'windows' && success() }}
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          ./script/windows/measure_ci_performance.ps1 -Mode Phase -Phase unit-tests -OutputDirectory (Join-Path $env:RUNNER_TEMP 'warp-windows-ci-${{ github.run_id }}-${{ github.run_attempt }}')
 
       - name: Run unit tests
         # Unlike later test steps, only run this if previous steps succeed (so
         # that we don't bother running these first tests if test compilation
         # fails).
         if: success()
-        run: cargo nextest run ${{ env.WORKSPACE_TEST_ARGS }} -E "not package(integration)"
+        run: ${{ matrix.os == 'windows' && './script/windows/measure_ci_performance.ps1 -Mode Run -Phase unit-tests' || format('cargo nextest run {0} -E "not package(integration)"', env.WORKSPACE_TEST_ARGS) }}
         env:
           # Unit tests may end up spawning a shell, but shouldn't care which
           # shell it is.  We'll use zsh, as it has the shortest bootstrap times
           # and tends to be the most reliable.
           WARP_SHELL_PATH: ${{ steps.echo_default_shell.outputs.default_shell_path }}
-      - name: Stop Windows resource measurements
-        if: ${{ matrix.os == 'windows' && !cancelled() }}
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          ./script/windows/measure_ci_performance.ps1 -Mode Stop -OutputDirectory (Join-Path $env:RUNNER_TEMP 'warp-windows-ci-${{ github.run_id }}-${{ github.run_attempt }}')
 
       - name: Upload Windows performance measurements
         if: ${{ matrix.os == 'windows' && !cancelled() }}
