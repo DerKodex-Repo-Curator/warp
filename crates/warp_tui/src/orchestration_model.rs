@@ -36,7 +36,7 @@ use warpui::SingletonEntity;
 use warpui_core::{AppContext, Entity, EntityId, ModelContext, ModelHandle, ViewHandle};
 
 use crate::cloud_run::TuiCloudRunState;
-use crate::session_registry::{RemoteChildSession, TuiSessionId, TuiSessionView, TuiSessions};
+use crate::session_registry::{RemoteChildSession, TuiSessionId, TuiSessions};
 use crate::tab_bar::{TuiTabBarNavigationDirection, TuiTabBarPagingState};
 use crate::terminal_session_view::TuiTerminalSessionView;
 
@@ -120,7 +120,6 @@ pub(crate) enum TuiOrchestrationEvent {
         working_directory: Option<PathBuf>,
         task_id: warp::tui_export::AmbientAgentTaskId,
         conversation_name: String,
-        definitions: Option<Box<warp::tui_export::ActivatedDefinitions>>,
     },
     CreateRemoteChildSession {
         parent_session_id: TuiSessionId,
@@ -160,7 +159,6 @@ pub(crate) struct MaterializedLocalOzChildSession {
     pub(crate) model_id: Option<String>,
     pub(crate) task_id: warp::tui_export::AmbientAgentTaskId,
     pub(crate) conversation_name: String,
-    pub(crate) definitions: Option<warp::tui_export::ActivatedDefinitions>,
 }
 
 impl Entity for TuiOrchestrationModel {
@@ -786,20 +784,10 @@ impl TuiOrchestrationModel {
         ctx: &mut ModelContext<Self>,
     ) {
         let request_team_scope = request.request_team_scope;
-        let factory_execution_id = TuiSessions::as_ref(ctx)
-            .session(parent_session_id)
-            .and_then(|session| match session.view() {
-                TuiSessionView::Terminal(view) => view.as_ref(ctx).factory_execution_id(ctx),
-                TuiSessionView::Cloud(_) => None,
-            });
         let launch = prepare_local_oz_child_launch(
             &request.name,
             &request.prompt,
             request.parent_run_id.as_deref(),
-            working_directory
-                .clone()
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
-            factory_execution_id,
             &request.metadata,
             request_team_scope,
             ctx,
@@ -812,7 +800,6 @@ impl TuiOrchestrationModel {
                 working_directory,
                 task_id: prepared.task_id,
                 conversation_name: prepared.conversation_name,
-                definitions: prepared.definitions.map(Box::new),
             }),
             Err(error) => me.fail_child_request(
                 &request,
@@ -838,7 +825,6 @@ impl TuiOrchestrationModel {
             model_id,
             task_id,
             conversation_name,
-            definitions,
         } = child;
         let child_surface_id = session_id.surface_id();
         let parent_surface_id = parent_session_id.surface_id();
@@ -873,7 +859,7 @@ impl TuiOrchestrationModel {
 
         let prompt = request.prompt;
         session_view.update(ctx, |view, ctx| {
-            view.start_orchestrated_child(task_id, prompt, conversation_id, definitions, ctx);
+            view.start_orchestrated_child(task_id, prompt, conversation_id, ctx);
         });
 
         self.child_session_by_conversation

@@ -2915,13 +2915,6 @@ impl BlocklistAIController {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    pub fn factory_execution_id(&self) -> Option<&str> {
-        self.factory_definitions
-            .as_ref()
-            .map(|definitions| definitions.execution_id.as_str())
-    }
-
-    #[cfg(not(target_family = "wasm"))]
     pub fn set_factory_definitions(
         &mut self,
         definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
@@ -2932,6 +2925,12 @@ impl BlocklistAIController {
                 manager.cache_definition_skills(definitions.skills.clone());
             });
         }
+        self.action_model
+            .as_ref(ctx)
+            .start_agent_executor(ctx)
+            .update(ctx, |executor, _| {
+                executor.set_factory_branch_active(definitions.is_some());
+            });
         self.factory_definitions = definitions;
     }
 

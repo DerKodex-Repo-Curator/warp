@@ -1,5 +1,6 @@
 //! Implementation of terminal panes.
 #[cfg(not(target_family = "wasm"))]
+use std::collections::HashMap;
 use std::sync::mpsc::SyncSender;
 
 #[cfg(not(target_family = "wasm"))]
@@ -1686,27 +1687,11 @@ fn launch_local_no_harness_child(
         .terminal_view_from_pane_id(parent_pane_id, ctx)
         .and_then(|view| host_terminal_shared_session_source_type(&view, ctx));
     let request_team_scope = request.request_team_scope;
-    let working_dir = group
-        .terminal_view_from_pane_id(parent_pane_id, ctx)
-        .and_then(|view| view.as_ref(ctx).pwd_if_local(ctx))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let factory_execution_id = group
-        .terminal_view_from_pane_id(parent_pane_id, ctx)
-        .and_then(|view| {
-            view.as_ref(ctx)
-                .ai_controller()
-                .as_ref(ctx)
-                .factory_execution_id()
-                .map(str::to_owned)
-        });
     let launch = prepare_local_oz_child_launch(
         &request.name,
         &request.prompt,
         request.parent_run_id.as_deref(),
-        working_dir,
-        factory_execution_id,
         &request.metadata,
         request_team_scope,
         ctx,
@@ -1724,11 +1709,7 @@ fn launch_local_no_harness_child(
                     name: prepared.conversation_name.clone(),
                     parent_conversation_id,
                     orchestration_harness: Some(Harness::Oz),
-                    env_vars: prepared
-                        .definitions
-                        .as_ref()
-                        .map(|definitions| definitions.env_vars())
-                        .unwrap_or_default(),
+                    env_vars: HashMap::new(),
                     task_context: Some(HiddenChildAgentTaskContext {
                         task_id: child_task_id,
                         working_dir: None,
@@ -1762,8 +1743,6 @@ fn launch_local_no_harness_child(
                         terminal_view
                             .ai_controller()
                             .update(ctx, |controller, ctx| {
-                                controller
-                                    .set_factory_definitions(prepared.definitions.clone(), ctx);
                                 controller.send_agent_query_in_conversation(
                                     prompt.clone(),
                                     conversation_id,
@@ -1848,15 +1827,6 @@ fn launch_local_harness_child(
         .terminal_view_from_pane_id(parent_pane_id, ctx)
         .and_then(|view| host_terminal_shared_session_source_type(&view, ctx));
 
-    let factory_execution_id = group
-        .terminal_view_from_pane_id(parent_pane_id, ctx)
-        .and_then(|view| {
-            view.as_ref(ctx)
-                .ai_controller()
-                .as_ref(ctx)
-                .factory_execution_id()
-                .map(str::to_owned)
-        });
     let model_id_for_harness_env = model_id.clone();
     let agent_name_for_task = agent_name.clone();
     let request_team_scope = request.request_team_scope;
@@ -1872,7 +1842,6 @@ fn launch_local_harness_child(
                 metadata,
                 shell_type,
                 startup_directory,
-                factory_execution_id,
                 ai_client,
                 request_team_scope,
             )

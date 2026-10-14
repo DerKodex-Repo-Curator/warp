@@ -10,7 +10,7 @@ use warp_cli::agent::{Harness, HarnessTransport};
 use crate::ai::agent_sdk::driver::AgentDriverError;
 use crate::ai::agent_sdk::driver::harness::claude_code::prepare_claude_environment_config;
 use crate::ai::agent_sdk::driver::harness::{
-    HarnessKind, harness_kind, harness_model_env_vars, publish_skills_for_agent_compatible_harness,
+    HarnessKind, harness_kind, harness_model_env_vars,
     remove_claude_externally_managed_listener_env_vars,
 };
 use crate::ai::agent_sdk::{task_env_vars, validate_cli_installed};
@@ -165,7 +165,6 @@ pub(super) async fn prepare_local_harness_child_launch(
     metadata: HashMap<String, String>,
     shell_type: Option<ShellType>,
     startup_directory: Option<PathBuf>,
-    factory_execution_id: Option<String>,
     ai_client: Arc<dyn AIClient>,
     team_scope: RequestTeamScope,
 ) -> Result<PreparedLocalHarnessLaunch, String> {
@@ -188,58 +187,27 @@ pub(super) async fn prepare_local_harness_child_launch(
         return Err(message.to_string());
     }
     validate_local_harness_shell(shell_type)?;
-    match harness {
-        Harness::Claude | Harness::Codex => {
-            let HarnessKind::ThirdParty(third_party_harness) =
-                harness_kind(harness, HarnessTransport::Pty)
-                    .map_err(|error: AgentDriverError| error.to_string())?
-            else {
-                unreachable!("Native local child resolves to a third-party harness")
-            };
-            third_party_harness
-                .validate()
-                .map_err(|error: AgentDriverError| error.to_string())?;
-        }
-        Harness::OpenCode => validate_cli_installed("opencode", Some("https://opencode.ai/docs"))
-            .map_err(|error: AgentDriverError| error.to_string())?,
-        Harness::Oz | Harness::Unknown | Harness::Gemini => unreachable!("Unsupported local child"),
-    }
-    let working_dir = startup_directory
-        .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| "Could not resolve the local child working directory".to_owned())?;
-    let task_id = ai_client
-        .create_agent_task(
-            prompt.clone(),
-            None,
-            parent_run_id.clone(),
-            local_child_task_config(harness, agent_name),
-            metadata,
-            team_scope,
-        )
-        .await
-        .map_err(|error| format!("Failed to create local child task: {error}"))?;
-    let definitions = crate::ai::factory_definitions::prepare_child(
-        &task_id.to_string(),
-        &working_dir,
-        factory_execution_id.as_deref(),
-        ai_client.as_ref(),
-    )
-    .await
-    .map_err(|error| format!("Failed to prepare local child definitions: {error:#}"))?;
-    let skill_dirs = definitions
-        .as_ref()
-        .map(|definitions| definitions.skill_dirs.clone())
-        .unwrap_or_else(ai::skills::parse_skills_dirs_env);
     let command = match harness {
         Harness::Oz => unreachable!("normalize_local_child_harness filters out Oz"),
         Harness::Unknown => unreachable!("normalize_local_child_harness filters out Unknown"),
         Harness::Claude => {
+            let working_dir = startup_directory
+                .or_else(|| std::env::current_dir().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "Could not resolve a working directory for the local {} child.",
+                        harness.display_name()
+                    )
+                })?;
             let HarnessKind::ThirdParty(third_party_harness) =
                 harness_kind(harness, HarnessTransport::Pty)
                     .map_err(|error: AgentDriverError| error.to_string())?
             else {
                 unreachable!("Claude resolves to a third-party harness")
             };
+            third_party_harness
+                .validate()
+                .map_err(|error: AgentDriverError| error.to_string())?;
             // Local child harness panes inherit the user's existing local
             // auth/session state. We still prepare harness config files here,
             // but there are no Warp-managed secrets to materialize into the
@@ -248,7 +216,7 @@ pub(super) async fn prepare_local_harness_child_launch(
                 &working_dir,
                 &working_dir,
                 &HashMap::new(),
-                &skill_dirs,
+                &ai::skills::parse_skills_dirs_env(),
                 false,
             )
             .map_err(|error| error.to_string())?;
@@ -259,40 +227,48 @@ pub(super) async fn prepare_local_harness_child_launch(
             build_local_claude_child_command(&local_claude_child_prompt(&prompt))
         }
         Harness::Codex => {
+            let HarnessKind::ThirdParty(third_party_harness) =
+                harness_kind(harness, HarnessTransport::Pty)
+                    .map_err(|error: AgentDriverError| error.to_string())?
+            else {
+                unreachable!("Codex resolves to a third-party harness")
+            };
+            third_party_harness
+                .validate()
+                .map_err(|error: AgentDriverError| error.to_string())?;
+
             // Local Codex child panes must rely on the user's existing local
             // auth/session state. Do not run the shared Codex environment prep
             // here: it can seed OPENAI_API_KEY into ~/.codex/auth.json and
             // rewrite ~/.codex/config.toml for the whole machine.
-            if definitions.is_some() {
-                publish_skills_for_agent_compatible_harness(
-                    &working_dir,
-                    &working_dir,
-                    &skill_dirs,
-                    false,
-                )
-                .map_err(|error| error.to_string())?;
-            }
             build_local_codex_child_command(&prompt)
         }
         Harness::OpenCode => {
-            if definitions.is_some() {
-                publish_skills_for_agent_compatible_harness(
-                    &working_dir,
-                    &working_dir,
-                    &skill_dirs,
-                    false,
-                )
-                .map_err(|error| error.to_string())?;
-            }
+            validate_cli_installed("opencode", Some("https://opencode.ai/docs"))
+                .map_err(|error: AgentDriverError| error.to_string())?;
             build_local_opencode_child_command(&prompt)
         }
         Harness::Gemini => unreachable!("normalize_local_child_harness filters out Gemini"),
     };
 
+    let task_id = ai_client
+        .create_agent_task(
+            prompt.clone(),
+            None,
+            parent_run_id.clone(),
+            local_child_task_config(harness, agent_name),
+            metadata,
+            team_scope,
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to create local {} child task: {error}",
+                harness.display_name()
+            )
+        })?;
+
     let mut env_vars = task_env_vars(Some(&task_id), parent_run_id.as_deref(), harness);
-    if let Some(definitions) = definitions {
-        env_vars.extend(definitions.env_vars());
-    }
     if harness == Harness::Claude {
         // Local Claude child panes are launched directly in hidden terminals,
         // not through AgentDriver's ClaudeHarnessRunner. Let the Claude plugin

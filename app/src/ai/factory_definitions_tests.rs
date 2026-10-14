@@ -11,31 +11,6 @@ struct GitFixture {
     second: String,
 }
 #[tokio::test]
-async fn factory_branch_child_requires_selected_execution_config() {
-    let root = tempfile::tempdir().unwrap();
-    let mut client = crate::server::server_api::ai::MockAIClient::new();
-    client
-        .expect_get_factory_definition_config()
-        .withf(|task_id, execution_id| task_id == "child" && execution_id == "42")
-        .times(1)
-        .returning(|_, _| {
-            Ok(
-                warp_graphql::queries::execution_config::FactoryExecutionDefinitions {
-                    execution_id: cynic::Id::new("42"),
-                    parent_run_id: Some(cynic::Id::new("parent")),
-                    factory_branch: None,
-                    factory_skill_dirs: Vec::new(),
-                },
-            )
-        });
-    assert!(
-        prepare_child("child", root.path(), Some("42"), &client)
-            .await
-            .is_err()
-    );
-    assert!(!root.path().join(".warp").exists());
-}
-#[tokio::test]
 async fn factory_branch_execution_config_missing_commit_fails_without_fallback() {
     let Some(fixture) =
         fixture_process("factory_branch_execution_config_missing_commit_fails_without_fallback")

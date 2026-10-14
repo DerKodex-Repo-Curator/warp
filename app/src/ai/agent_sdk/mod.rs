@@ -888,6 +888,11 @@ impl AgentDriverRunner {
                 .post_timeline_event(OzRunTimelineEvent::WorkerContainerReady)
                 .await;
             let factory_branch = std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty());
+            if factory_branch && (args.gui || !warp_isolation_platform::workload_token_available()) {
+                return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
+                    "Factory branches require a headless cloud task workload"
+                )));
+            }
             let factory_child_config = if factory_branch && !args.sandboxed {
                 let task_id = args.task_id.as_deref().context("Missing Factory task ID")
                     .map_err(AgentDriverError::ConfigBuildFailed)?;
@@ -1461,9 +1466,18 @@ impl AgentDriverRunner {
 
         let factory_branch =
             std::env::var("WARP_FACTORY_BRANCH").is_ok_and(|branch| !branch.is_empty());
-        if factory_branch && args.task_id.is_none() {
+        let has_branch_config = execution_data
+            .as_ref()
+            .is_some_and(|data| data.config.factory_branch.is_some())
+            || factory_child_config.is_some();
+        if (factory_branch || has_branch_config)
+            && (args.gui
+                || args.task_id.is_none()
+                || args.execution_id.is_none()
+                || !warp_isolation_platform::workload_token_available())
+        {
             return Err(AgentDriverError::ConfigBuildFailed(anyhow::anyhow!(
-                "Factory branches require a configured Factory task"
+                "Factory branches require a headless cloud task workload"
             )));
         }
         let factory_descendant = factory_child_config.is_some();

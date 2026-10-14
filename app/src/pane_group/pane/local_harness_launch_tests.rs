@@ -1,15 +1,11 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use command::blocking::Command;
-use git2::{Repository, Signature};
 use tempfile::TempDir;
 use warp_cli::agent::Harness;
 use warp_core::features::FeatureFlag;
-use warp_graphql::queries::execution_config::FactoryBranchExecutionConfig;
 
 use super::{
     build_local_claude_child_command, build_local_codex_child_command,
@@ -54,167 +50,6 @@ impl EnvVarGuard {
         unsafe { std::env::set_var(key, value.into()) };
         Self { key, original }
     }
-}
-
-#[tokio::test]
-#[serial_test::serial]
-async fn factory_branch_local_native_children_publish_activated_skills_without_global_auth_changes()
-{
-    let Some(root) = std::env::var_os("WARP_LOCAL_FACTORY_FIXTURE") else {
-        let root = TempDir::new().unwrap();
-        let source = Repository::init(root.path().join("source")).unwrap();
-        let skill = source.workdir().unwrap().join("skills/example/SKILL.md");
-        fs::create_dir_all(skill.parent().unwrap()).unwrap();
-        fs::write(
-            skill,
-            "---\nname: example\ndescription: Selected definitions\n---\nRead selected assets.\n",
-        )
-        .unwrap();
-        let mut index = source.index().unwrap();
-        index
-            .add_all(["skills"], git2::IndexAddOption::DEFAULT, None)
-            .unwrap();
-        let tree = source.find_tree(index.write_tree().unwrap()).unwrap();
-        let signature = Signature::now("Fixture", "fixture@example.invalid").unwrap();
-        source
-            .commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                "Selected skills",
-                &tree,
-                &[],
-            )
-            .unwrap();
-        let source_url = url::Url::from_directory_path(source.workdir().unwrap()).unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "pane_group::pane::local_harness_launch::tests::factory_branch_local_native_children_publish_activated_skills_without_global_auth_changes",
-                "--nocapture",
-            ])
-            .env("WARP_LOCAL_FACTORY_FIXTURE", root.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", root.path().join("empty-config"))
-            .env("GIT_CONFIG_COUNT", "2")
-            .env("GIT_CONFIG_KEY_0", format!("url.{source_url}.insteadOf"))
-            .env("GIT_CONFIG_VALUE_0", "https://fixture.invalid/definitions")
-            .env("GIT_CONFIG_KEY_1", "protocol.file.allow")
-            .env("GIT_CONFIG_VALUE_1", "always")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return;
-    };
-
-    let root = PathBuf::from(root);
-    let source = Repository::open(root.join("source")).unwrap();
-    let head = source.head().unwrap().target().unwrap();
-    let bin = root.join("bin");
-    fs::create_dir(&bin).unwrap();
-    write_fake_cli(&bin, "codex");
-    write_fake_cli(&bin, "opencode");
-    let path = std::env::join_paths(
-        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-    )
-    .unwrap();
-    let home = root.join("home");
-    fs::create_dir(&home).unwrap();
-    let _home = EnvVarGuard::set("HOME", &home);
-    let _path = EnvVarGuard::set("PATH", path);
-    let _local_codex = FeatureFlag::LocalClaudeCodexChildHarnesses.override_enabled(true);
-
-    for harness in ["codex", "opencode"] {
-        let working_dir = root.join(harness);
-        let repository =
-            Repository::clone(source.workdir().unwrap().to_str().unwrap(), &working_dir).unwrap();
-        let origin = repository
-            .find_remote("origin")
-            .unwrap()
-            .url()
-            .unwrap()
-            .to_owned();
-        let mut client = MockAIClient::new();
-        client
-            .expect_create_agent_task()
-            .times(1)
-            .withf(|_, _, _, _, metadata, _| {
-                metadata.get("role").map(String::as_str) == Some("implementation")
-            })
-            .returning(|_, _, _, _, _, _| {
-                Ok("550e8400-e29b-41d4-a716-446655440000".parse().unwrap())
-            });
-        let metadata = FactoryBranchExecutionConfig {
-            factory_id: cynic::Id::new("factory"),
-            branch_id: cynic::Id::new("preview"),
-            branch: "preview".into(),
-            source_sha: head.to_string(),
-            repository_url: "https://fixture.invalid/definitions".into(),
-        };
-        client
-            .expect_get_factory_definition_config()
-            .times(1)
-            .withf(|_, execution_id| execution_id == "42")
-            .returning(move |_, _| {
-                Ok(
-                    warp_graphql::queries::execution_config::FactoryExecutionDefinitions {
-                        execution_id: cynic::Id::new("42"),
-                        parent_run_id: Some(cynic::Id::new("parent")),
-                        factory_branch: Some(metadata.clone()),
-                        factory_skill_dirs: vec!["skills".into()],
-                    },
-                )
-            });
-
-        let prepared = prepare_local_harness_child_launch(
-            "Read the example skill".into(),
-            harness.into(),
-            None,
-            Some("parent-run".into()),
-            None,
-            HashMap::from([("role".into(), "implementation".into())]),
-            Some(ShellType::Bash),
-            Some(working_dir.clone()),
-            Some("42".into()),
-            Arc::new(client),
-            teamless_request_scope(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            prepared.env_vars.get(&OsString::from("WARP_EXECUTION_ID")),
-            Some(&OsString::from("42"))
-        );
-        let selected = PathBuf::from(
-            prepared
-                .env_vars
-                .get(&OsString::from("WARP_SKILL_DIRS"))
-                .unwrap(),
-        );
-        let published = working_dir.join(".agents/skills/example");
-        assert_eq!(
-            published.canonicalize().unwrap(),
-            selected.join("example").canonicalize().unwrap()
-        );
-        assert_eq!(
-            fs::read_to_string(published.join("SKILL.md")).unwrap(),
-            "---\nname: example\ndescription: Selected definitions\n---\nRead selected assets.\n"
-        );
-        assert_eq!(repository.head().unwrap().target().unwrap(), head);
-        assert_eq!(
-            repository.find_remote("origin").unwrap().url(),
-            Some(origin.as_str())
-        );
-    }
-    assert!(!home.join(".codex").exists());
-    assert!(!home.join(".agents").exists());
-    assert!(!home.join(".config/opencode").exists());
 }
 
 impl Drop for EnvVarGuard {
@@ -434,7 +269,6 @@ async fn prepare_local_codex_child_launch_rejects_without_rewriting_global_codex
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        None,
         Arc::new(ai_client),
         teamless_request_scope(),
     )
@@ -475,7 +309,6 @@ async fn prepare_local_codex_child_launch_succeeds_when_testing_flag_is_enabled(
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        None,
         Arc::new(ai_client),
         teamless_request_scope(),
     )
@@ -528,7 +361,6 @@ async fn prepare_local_claude_child_propagates_scope_and_merges_model_env_var() 
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        None,
         Arc::new(ai_client),
         RequestTeamScope::from_scope(&TeamContextForOperation::new_for_test(team_uid)),
     )
@@ -588,7 +420,6 @@ async fn prepare_local_claude_child_no_anthropic_model_when_empty() {
         HashMap::new(),
         Some(ShellType::Zsh),
         Some(working_dir),
-        None,
         Arc::new(ai_client),
         teamless_request_scope(),
     )
@@ -612,7 +443,6 @@ async fn prepare_local_harness_child_launch_rejects_disabled_codex_before_shell_
         Some("parent-run".to_string()),
         None,
         HashMap::new(),
-        None,
         None,
         None,
         ai_client,

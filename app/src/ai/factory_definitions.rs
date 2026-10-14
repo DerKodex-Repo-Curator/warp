@@ -12,29 +12,6 @@ use uuid::Uuid;
 use warp_graphql::queries::execution_config::FactoryBranchExecutionConfig;
 
 use crate::server::server_api::ai::GitCredential;
-pub(crate) async fn prepare_child(
-    task_id: &str,
-    working_dir: &Path,
-    execution_id: Option<&str>,
-    client: &dyn crate::server::server_api::ai::AIClient,
-) -> anyhow::Result<Option<ActivatedDefinitions>> {
-    let Some(execution_id) = execution_id else {
-        return Ok(None);
-    };
-    let config = client
-        .get_factory_definition_config(task_id, execution_id)
-        .await?;
-    let branch = config
-        .factory_branch
-        .context("Factory child execution configuration has no selected definitions")?;
-    prepare_from_config(
-        working_dir,
-        config.execution_id.inner(),
-        Some(&branch),
-        &config.factory_skill_dirs,
-    )
-    .await
-}
 
 const SETUP_BUDGET: Duration = Duration::from_secs(30);
 pub(crate) async fn prepare_from_config(

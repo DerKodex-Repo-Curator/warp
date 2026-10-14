@@ -60,7 +60,6 @@ use codex::CodexHarness;
 use codex_transcript::CodexResumeInfo;
 use gemini::GeminiHarness;
 use harness_persistence::{HarnessPersistence, PersistenceOutcome};
-pub(crate) use skill_dirs_publish::publish_skills_for_agent_compatible_harness;
 pub(crate) use telemetry::ThirdPartyHarnessTelemetryEvent;
 
 const HARNESS_FAILURE_OUTPUT_TRUNCATION_MARKER: &str = "\n… harness output truncated …\n";

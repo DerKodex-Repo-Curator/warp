@@ -919,6 +919,7 @@ async fn try_refresh(
             .await
             .map_err(|error| TaskGitCredentialsError::Request(error.into()))?
             .token;
+
     let response = ai_client
         .get_task_git_credentials(
             task_id.to_string(),
@@ -927,6 +928,7 @@ async fn try_refresh(
             use_factory_repositories,
         )
         .await?;
+
     if apply_refreshed_credentials(response).map_err(TaskGitCredentialsError::Request)? {
         Ok(())
     } else {

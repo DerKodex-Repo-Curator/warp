@@ -53,6 +53,84 @@ use crate::workspaces::workspace::{Workspace, WorkspaceUid};
 const TASK_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[test]
+fn factory_branch_driver_rejects_interactive_and_unbound_launches() {
+    use warp_graphql::queries::execution_config::{
+        FactoryBranchExecutionConfig, FactoryExecutionDefinitions,
+    };
+    if std::env::var_os("WARP_SDK_FACTORY_GATE_FIXTURE").is_none() {
+        let output = ProcessCommand::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ai::agent_sdk::tests::factory_branch_driver_rejects_interactive_and_unbound_launches"])
+            .env("WARP_SDK_FACTORY_GATE_FIXTURE", "1")
+            .env("WARP_ISOLATION_PLATFORM", "docker")
+            .env("WARP_WORKLOAD_TOKEN", "test-workload-token")
+            .env_remove("WARP_EXECUTION_ID")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    App::test((), |mut app| async move {
+        app.add_singleton_model(|_| ServerApiProvider::new_for_test());
+        let runner = app.add_singleton_model(|_| AgentDriverRunner);
+        let foreground = runner.update(&mut app, |_, ctx| ctx.spawner());
+        let client: Arc<dyn AIClient> = Arc::new(MockAIClient::new());
+        let events = runner.update(&mut app, |_, ctx| {
+            super::SetupClientEventReporter::noop(client.clone(), ctx.background_executor())
+        });
+        let root = tempfile::tempdir().unwrap();
+        for arguments in [
+            vec![
+                "agent",
+                "run",
+                "--gui",
+                "--task-id",
+                TASK_ID,
+                "--execution-id",
+                "42",
+            ],
+            vec!["agent", "run", "--task-id", TASK_ID],
+        ] {
+            let mut args = parse_run_agent_args(&arguments);
+            args.cwd = Some(root.path().into());
+            let config = FactoryExecutionDefinitions {
+                execution_id: cynic::Id::new("42"),
+                parent_run_id: Some(cynic::Id::new("parent")),
+                factory_skill_dirs: vec![],
+                factory_branch: Some(FactoryBranchExecutionConfig {
+                    factory_id: cynic::Id::new("factory"),
+                    branch_id: cynic::Id::new("branch"),
+                    branch: "feature".into(),
+                    source_sha: "a".repeat(40),
+                    repository_url: "https://fixture.invalid/definitions".into(),
+                }),
+            };
+            let result = AgentDriverRunner::build_driver_options_and_task(
+                &foreground,
+                args,
+                None,
+                &client,
+                &events,
+                None,
+                Some(config),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(AgentDriverError::ConfigBuildFailed(error))
+                    if error.to_string() == "Factory branches require a headless cloud task workload"
+            ));
+        }
+        assert!(!root.path().join(".warp").exists());
+    });
+}
+
+#[test]
 fn factory_branch_sdk_child_activates_definitions_without_remote_bootstrap() {
     use git2::{Repository, Signature};
     use warp_graphql::queries::execution_config::{

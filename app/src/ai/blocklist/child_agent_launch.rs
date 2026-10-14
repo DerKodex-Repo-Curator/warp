@@ -26,19 +26,15 @@ use crate::workspaces::user_workspaces::TeamScope;
 pub struct PreparedLocalOzChildLaunch {
     pub task_id: AmbientAgentTaskId,
     pub conversation_name: String,
-    pub definitions: Option<crate::ai::factory_definitions::ActivatedDefinitions>,
 }
 
 /// Creates the server task row shared by the GUI hidden-pane and TUI
 /// background-session launch paths.
 #[cfg(not(target_family = "wasm"))]
-#[allow(clippy::too_many_arguments)]
 pub fn prepare_local_oz_child_launch(
     name: &str,
     prompt: &str,
     parent_run_id: Option<&str>,
-    working_dir: std::path::PathBuf,
-    factory_execution_id: Option<String>,
     metadata: &HashMap<String, String>,
     team_scope: RequestTeamScope,
     ctx: &AppContext,
@@ -54,7 +50,7 @@ pub fn prepare_local_oz_child_launch(
             .create_agent_task(
                 prompt,
                 None,
-                parent_run_id.clone(),
+                parent_run_id,
                 Some(AgentConfigSnapshot {
                     name: agent_name,
                     ..Default::default()
@@ -63,17 +59,9 @@ pub fn prepare_local_oz_child_launch(
                 team_scope,
             )
             .await?;
-        let definitions = crate::ai::factory_definitions::prepare_child(
-            &task_id.to_string(),
-            &working_dir,
-            factory_execution_id.as_deref(),
-            ai_client.as_ref(),
-        )
-        .await?;
         Ok(PreparedLocalOzChildLaunch {
             task_id,
             conversation_name,
-            definitions,
         })
     }
 }

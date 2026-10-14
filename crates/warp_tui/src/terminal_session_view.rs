@@ -2407,13 +2407,6 @@ impl TuiTerminalSessionView {
         self.cli_agent_osc_event_publisher = Some(publisher);
     }
 
-    pub(crate) fn factory_execution_id(&self, ctx: &AppContext) -> Option<String> {
-        self.ai_controller
-            .as_ref(ctx)
-            .factory_execution_id()
-            .map(str::to_owned)
-    }
-
     /// Starts the first request for a child conversation hosted by this
     /// background session.
     pub(crate) fn start_orchestrated_child(
@@ -2421,12 +2414,10 @@ impl TuiTerminalSessionView {
         task_id: warp::tui_export::AmbientAgentTaskId,
         prompt: String,
         conversation_id: AIConversationId,
-        definitions: Option<warp::tui_export::ActivatedDefinitions>,
         ctx: &mut ViewContext<Self>,
     ) {
         self.ai_controller.update(ctx, |controller, ctx| {
             controller.set_ambient_agent_task_id(Some(task_id), ctx);
-            controller.set_factory_definitions(definitions, ctx);
             controller.send_agent_query_in_conversation(prompt, conversation_id, ctx);
         });
     }

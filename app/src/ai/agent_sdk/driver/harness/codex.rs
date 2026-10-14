@@ -647,12 +647,18 @@ pub(super) fn publish_skills_for_codex(
     has_deferred_repositories: bool,
 ) -> Result<()> {
     let skill_root = harness_working_dir.join(".agents").join("skills");
-    let published = super::publish_skills_for_agent_compatible_harness(
+    let is_sandbox = warp_isolation_platform::detect().is_some();
+    let published = super::skill_dirs_publish::publish_skills_for_harness(
+        &skill_root,
         workspace_root,
-        harness_working_dir,
+        is_sandbox,
         skill_dirs,
         has_deferred_repositories,
     )?;
+    super::skill_dirs_publish::exclude_published_skill_paths_from_git(
+        harness_working_dir,
+        &published,
+    );
     if !published.is_empty() {
         let published = published.len();
         safe_info!(
