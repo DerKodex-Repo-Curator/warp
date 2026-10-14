@@ -69,7 +69,7 @@ fn factory_test_git(root: &Path, args: &[&str]) -> String {
 #[test]
 fn factory_branch_bootstrap_keeps_definitions_separate_from_working_head() {
     let root = tempfile::TempDir::new().unwrap();
-    let source = root.path().join("source");
+    let source = dunce::canonicalize(root.path()).unwrap().join("source");
     fs::create_dir(&source).unwrap();
     factory_test_git(&source, &["init", "--quiet"]);
     factory_test_git(
@@ -122,7 +122,7 @@ fn factory_branch_bootstrap_keeps_definitions_separate_from_working_head() {
         &git_config,
         format!(
             "[url \"{}\"]\n\tinsteadOf = https://example.com/definitions.git\n",
-            source.display()
+            url::Url::from_directory_path(&source).unwrap()
         ),
     )
     .unwrap();
