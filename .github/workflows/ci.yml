@@ -24,6 +24,14 @@ on:
         options:
           - default
           - cgu256
+      tui_bin_harnesses:
+        description: Include empty TUI channel-bin test harnesses
+        required: true
+        type: choice
+        default: enabled
+        options:
+          - enabled
+          - disabled
   workflow_call:
 
 name: Warp CI
@@ -182,6 +190,13 @@ jobs:
           target_os: ${{ matrix.os }}
           is_self_hosted: ${{ matrix.is_self_hosted }}
           install_test_deps: true
+
+      - name: Select Windows TUI harness policy after cache restore
+        if: ${{ matrix.os == 'windows' }}
+        shell: pwsh
+        env:
+          TUI_BIN_HARNESSES: ${{ inputs.tui_bin_harnesses || 'enabled' }}
+        run: ./script/windows/prepare_tui_harness_experiment.ps1 -Policy $env:TUI_BIN_HARNESSES
 
       - name: Install Shells
         uses: ConorMacBride/install-package@3e7ad059e07782ee54fa35f827df52aae0626f30 # v1
