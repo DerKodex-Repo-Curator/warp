@@ -16,6 +16,14 @@ on:
         options:
           - self_hosted
           - github_hosted
+      compiler_profile:
+        description: Diagnostic profile of the Windows warp libtest compiler
+        required: true
+        type: choice
+        default: 'off'
+        options:
+          - 'off'
+          - warp-libtest
   workflow_call:
 
 name: Warp CI
@@ -288,8 +296,9 @@ jobs:
       - name: Compile tests
         # `--timings` makes cargo write a per-crate build timeline to
         # target/cargo-timings/cargo-timing.html without changing the build.
-        run: ${{ matrix.os == 'windows' && './script/windows/measure_ci_performance.ps1 -Mode Run -Phase compile' || format('cargo nextest run {0} --no-run --timings', env.WORKSPACE_TEST_ARGS) }}
+        run: ${{ matrix.os == 'windows' && './script/windows/profile_libtest_compile.ps1 -Mode Run -CompilerProfile $env:WINDOWS_COMPILER_PROFILE' || format('cargo nextest run {0} --no-run --timings', env.WORKSPACE_TEST_ARGS) }}
         env:
+          WINDOWS_COMPILER_PROFILE: ${{ inputs.compiler_profile || 'off' }}
           # Attach the GitHub auth token so that requests to the GitHub API
           # don't get rate limited during compilation (e.g.: retrieving
           # Sentry SDK binary releases).
@@ -329,6 +338,20 @@ jobs:
         with:
           name: windows-ci-performance-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/warp-windows-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Validate Windows compiler profile
+        if: ${{ matrix.os == 'windows' && inputs.compiler_profile == 'warp-libtest' && !cancelled() }}
+        shell: pwsh
+        run: ./script/windows/profile_libtest_compile.ps1 -Mode Publish -CompilerProfile warp-libtest
+
+      - name: Upload Windows compiler profile
+        if: ${{ matrix.os == 'windows' && inputs.compiler_profile == 'warp-libtest' && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: warp-libtest-compiler-profile-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/warp-libtest-profile-${{ github.run_id }}-${{ github.run_attempt }}/artifact
           if-no-files-found: warn
           retention-days: 7
 
