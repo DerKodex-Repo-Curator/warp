@@ -11,8 +11,6 @@ use std::time::Duration;
 
 use ai::api_keys::{ApiKeyManager, AwsCredentialsRefreshStrategy};
 use anyhow::Context;
-use command::Stdio;
-use command::r#async::Command;
 pub use driver::AgentDriver;
 use driver::AgentDriverError;
 pub(crate) use driver::harness::{ClaudeHarness, task_env_vars, validate_cli_installed};
@@ -688,6 +686,8 @@ fn build_execution_task_and_options(
                 config.setup_commands,
             )?;
             workspace.factory_skill_dirs = Some(factory_skill_dirs);
+            workspace.factory_definition_source_sha =
+                config.factory_branch.map(|branch| branch.source_sha);
             workspace
         },
         computer_use_config: (selected_harness == Harness::Oz).then(|| {
@@ -717,114 +717,6 @@ fn build_execution_task_and_options(
     ))
 }
 
-async fn prepare_execution_factory_skill_dirs(
-    config: &ExecutionConfiguration,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let dirs = execution_config::factory_skill_dirs(config.factory_skill_dirs.clone())?;
-    let Some(branch) = &config.factory_branch else {
-        return Ok(dirs);
-    };
-    if branch.source_sha.len() != 40
-        || !branch
-            .source_sha
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        anyhow::bail!("Factory definitions require a full source SHA");
-    }
-    let url = url::Url::parse(&branch.repository_url)
-        .context("Invalid Factory definition repository URL")?;
-    if url.scheme() != "https"
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || branch.repository_url.chars().any(char::is_control)
-    {
-        anyhow::bail!("Factory definition repository URL must be credential-free HTTPS");
-    }
-    if config
-        .factory_skill_dirs
-        .iter()
-        .any(|dir| dir.contains(['\\', ':']) || dir.chars().any(char::is_control))
-    {
-        anyhow::bail!("Factory skill directories must be repository-relative paths");
-    }
-    async_compat::Compat::new(async {
-        tokio::time::timeout(Duration::from_secs(30), async {
-            let leaf = tempfile::Builder::new().prefix("warp-factory-").tempdir()?;
-            let root = dunce::canonicalize(leaf.path())?;
-            if root.to_string_lossy().contains(',') {
-                anyhow::bail!("Factory definition directory cannot contain a comma");
-            }
-            factory_definition_git(&root, &["init", "--quiet", "--template="]).await?;
-            factory_definition_git(&root, &["remote", "add", "origin", &branch.repository_url])
-                .await?;
-            factory_definition_git(
-                &root,
-                &[
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--depth=1",
-                    "origin",
-                    &branch.source_sha,
-                ],
-            )
-            .await?;
-            factory_definition_git(
-                &root,
-                &["checkout", "--quiet", "--detach", &branch.source_sha],
-            )
-            .await?;
-            let head = factory_definition_git(&root, &["rev-parse", "HEAD"]).await?;
-            if !head.trim().eq_ignore_ascii_case(&branch.source_sha) {
-                anyhow::bail!("Factory definition checkout does not match its source SHA");
-            }
-            for entry in walkdir::WalkDir::new(&root).follow_links(false) {
-                let entry = entry?;
-                if entry.file_type().is_symlink()
-                    && !dunce::canonicalize(entry.path())
-                        .context("Factory definition contains a dangling symlink")?
-                        .starts_with(&root)
-                {
-                    anyhow::bail!("Factory definition symlink escapes its checkout");
-                }
-            }
-            let dirs = dirs.into_iter().map(|dir| root.join(dir)).collect();
-            // Native harness publications retain symlinks into this checkout beyond SDK setup.
-            let _ = leaf.keep();
-            Ok(dirs)
-        })
-        .await
-        .context("Factory definition checkout timed out")?
-    })
-    .await
-}
-
-async fn factory_definition_git(root: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .args(["-c", "core.hooksPath=.git/warp-no-hooks"])
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "never")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .context("Could not run Git for Factory definitions")?;
-    if !output.status.success() {
-        anyhow::bail!("Factory definition Git {} failed", args[0]);
-    }
-    String::from_utf8(output.stdout).context("Invalid Factory definition Git output")
-}
 fn selected_execution_skills(
     skills: Vec<ResolvedSkill>,
 ) -> Result<(Option<ResolvedSkill>, Vec<PathBuf>), AgentDriverError> {
@@ -1563,9 +1455,9 @@ impl AgentDriverRunner {
             attachments,
         }) = execution_data
         {
-            let mut factory_skill_dirs = prepare_execution_factory_skill_dirs(&config)
-                .await
-                .map_err(AgentDriverError::ConfigBuildFailed)?;
+            let mut factory_skill_dirs =
+                execution_config::factory_skill_dirs(config.factory_skill_dirs.clone())
+                    .map_err(AgentDriverError::ConfigBuildFailed)?;
             let (first_skill, skill_discovery_dirs) = Self::resolve_execution_skills(
                 foreground,
                 &args,
