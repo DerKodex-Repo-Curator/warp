@@ -625,7 +625,7 @@ fn prepend_factory_definition_clone_for_values(
             if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(
                     PrepareEnvironmentError::InvalidRepositoryPreparationOverrides {
-                        reason: "Factory definitions require a full source SHA".to_owned(),
+                        reason: "Pinned factory definitions require a full source SHA".to_owned(),
                     },
                 );
             }
