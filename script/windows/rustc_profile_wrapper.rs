@@ -21,7 +21,7 @@ fn is_app_library(argument: &OsStr) -> bool {
     normalized == "app/src/lib.rs" || (absolute && normalized.ends_with("/app/src/lib.rs"))
 }
 
-fn is_warp_libtest(arguments: &[OsString]) -> bool {
+fn is_warp_test_target(arguments: &[OsString]) -> bool {
     let mut names = arguments
         .iter()
         .enumerate()
@@ -37,7 +37,25 @@ fn is_warp_libtest(arguments: &[OsString]) -> bool {
         });
     matches!((names.next(), names.next()), (Some(name), None) if name == "warp")
         && arguments.iter().any(|argument| argument == "--test")
-        && arguments.iter().any(|argument| is_app_library(argument))
+}
+
+fn is_warp_libtest(arguments: &[OsString]) -> bool {
+    is_warp_test_target(arguments) && arguments.iter().any(|argument| is_app_library(argument))
+}
+
+fn target_matches(arguments: &[OsString], expected_source: Option<&Path>) -> io::Result<bool> {
+    let Some(expected_source) = expected_source else {
+        return Ok(is_warp_libtest(arguments));
+    };
+    if !is_warp_test_target(arguments) {
+        return Ok(false);
+    }
+    let expected = expected_source.canonicalize()?;
+    Ok(arguments.iter().any(|argument| {
+        let file = Path::new(argument);
+        file.extension() == Some(OsStr::new("rs"))
+            && file.canonicalize().is_ok_and(|path| path == expected)
+    }))
 }
 
 fn selection_arguments(arguments: &[OsString]) -> io::Result<Cow<'_, [OsString]>> {
@@ -135,7 +153,7 @@ fn profile_compiler(compiler: &OsStr, arguments: &[OsString], directory: &Path) 
     let elapsed = clock.elapsed().as_secs_f64();
     let finished = epoch_milliseconds();
     let metadata = format!(
-        "{{\"crate\":\"warp\",\"libtest\":true,\"pid\":{pid},\
+        "{{\"crate\":\"warp\",\"source\":\"app/src/lib.rs\",\"libtest\":true,\"pid\":{pid},\
          \"started_epoch_ms\":{started},\"finished_epoch_ms\":{finished},\
          \"elapsed_seconds\":{elapsed},\"compiler_exit_code\":{code},\
          \"timing_capture_succeeded\":{captured},\
@@ -156,7 +174,8 @@ fn run() -> io::Result<i32> {
         .ok_or_else(|| io::Error::other("Missing compiler executable."))?;
     let arguments: Vec<_> = arguments.collect();
     let selection = selection_arguments(&arguments)?;
-    if !is_warp_libtest(&selection) {
+    let expected_source = std::env::var_os("WARP_CI_RUSTC_SOURCE");
+    if !target_matches(&selection, expected_source.as_deref().map(Path::new))? {
         return Ok(Command::new(compiler)
             .args(arguments)
             .status()?

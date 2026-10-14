@@ -101,3 +101,29 @@ fn selects_from_a_cargo_response_file_without_rewriting_it() {
     assert_eq!(fs::read_to_string(&path).unwrap(), contents);
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn requires_the_exact_expected_source_file_when_configured() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let source = std::env::temp_dir().join(format!("warp-profile-source-{unique}.rs"));
+    let other = std::env::temp_dir().join(format!("warp-profile-other-{unique}.rs"));
+    fs::write(&source, []).unwrap();
+    fs::write(&other, []).unwrap();
+    let selected = vec![
+        OsString::from("--crate-name=warp"),
+        OsString::from("--test"),
+        source.as_os_str().to_owned(),
+    ];
+    let wrong = vec![
+        OsString::from("--crate-name=warp"),
+        OsString::from("--test"),
+        other.as_os_str().to_owned(),
+    ];
+    assert!(target_matches(&selected, Some(&source)).unwrap());
+    assert!(!target_matches(&wrong, Some(&source)).unwrap());
+    fs::remove_file(source).unwrap();
+    fs::remove_file(other).unwrap();
+}

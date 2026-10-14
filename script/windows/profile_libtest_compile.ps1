@@ -27,7 +27,7 @@ $capture = Join-Path $OutputDirectory 'capture'
 $work = Join-Path $OutputDirectory 'work'
 
 if ($Mode -eq 'Run') {
-    foreach ($name in @('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTC_BOOTSTRAP', 'WARP_CI_RUSTC_PROFILE_DIR')) {
+    foreach ($name in @('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTC_BOOTSTRAP', 'WARP_CI_RUSTC_PROFILE_DIR', 'WARP_CI_RUSTC_SOURCE')) {
         if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
             throw "Unexpected existing $name configuration."
         }
@@ -54,15 +54,19 @@ if ($Mode -eq 'Run') {
     }
     $previousWrapper = $env:RUSTC_WRAPPER
     $previousDirectory = $env:WARP_CI_RUSTC_PROFILE_DIR
+    $previousSource = $env:WARP_CI_RUSTC_SOURCE
+    $expectedSource = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../app/src/lib.rs')).Path
     $code = 1
     try {
         $env:RUSTC_WRAPPER = $wrapper
         $env:WARP_CI_RUSTC_PROFILE_DIR = $capture
+        $env:WARP_CI_RUSTC_SOURCE = $expectedSource
         & $collector -Mode Run -Phase compile
         $code = $LASTEXITCODE
     } finally {
         $env:RUSTC_WRAPPER = $previousWrapper
         $env:WARP_CI_RUSTC_PROFILE_DIR = $previousDirectory
+        $env:WARP_CI_RUSTC_SOURCE = $previousSource
     }
     exit $code
 }
@@ -93,7 +97,7 @@ foreach ($file in @(
         $issues += 'missing-metadata'
     }
 }
-if ($null -eq $invocation -or $invocation.crate -ne 'warp' -or -not $invocation.libtest -or
+if ($null -eq $invocation -or $invocation.crate -ne 'warp' -or $invocation.source -ne 'app/src/lib.rs' -or -not $invocation.libtest -or
     $invocation.bootstrap_scope -ne 'selected-compiler-child' -or $invocation.events -ne 'default' -or
     $invocation.counter -ne 'wall-time') {
     $issues += 'unexpected-target-metadata'
