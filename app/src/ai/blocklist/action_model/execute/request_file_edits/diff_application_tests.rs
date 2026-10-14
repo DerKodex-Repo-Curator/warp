@@ -12,6 +12,11 @@ use crate::ai::agent::{AIIdentifiers, FileEdit};
 use crate::ai::blocklist::SessionContext;
 use crate::auth::auth_state::AuthState;
 
+// Reuse one reader/future type so the generic diff pipeline is compiled once for these tests.
+async fn read_file_for_test(path: String) -> FileReadResult {
+    FileReadResult::from(std::fs::read_to_string(path))
+}
+
 fn update_deltas(diff: &AIRequestedCodeDiff) -> &[DiffDelta] {
     match &diff.diff_type {
         DiffType::Update { deltas, .. } => deltas,
@@ -44,7 +49,7 @@ fn test_apply_diffs_error_when_no_diffs_applied() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -91,7 +96,7 @@ fn test_apply_diffs_succeeds_with_valid_diff() {
             background_executor,
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -140,7 +145,7 @@ fn test_apply_diffs_with_partial_failures() {
             background_executor,
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -179,7 +184,7 @@ fn test_apply_diffs_with_new_file() {
             background_executor.clone(),
             auth_state.clone(),
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -224,7 +229,7 @@ fn test_apply_diffs_with_missing_file() {
             background_executor,
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         ));
 
         // Should fail due to the invalid diff.
@@ -276,7 +281,7 @@ fn test_parse_diffs_with_mixed_empty_and_valid_diffs() {
             background_executor,
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -320,7 +325,7 @@ fn test_apply_diffs_noop_with_successful_change() {
             app.background_executor(),
             Arc::new(AuthState::new_for_test()),
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -368,7 +373,7 @@ fn test_apply_diffs_fails_with_only_noop() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -418,7 +423,7 @@ fn test_multiple_file_create_edits_for_same_path() {
             background_executor,
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -462,7 +467,7 @@ fn test_mixed_create_and_edit_for_same_path() {
             background_executor,
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -501,7 +506,7 @@ fn test_delete_and_create_same_path_replaces_existing_file() {
             app.background_executor(),
             Arc::new(AuthState::new_for_test()),
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -541,7 +546,7 @@ fn test_create_then_delete_same_path_replaces_existing_file() {
             app.background_executor(),
             Arc::new(AuthState::new_for_test()),
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -585,7 +590,7 @@ fn test_delete_create_and_edit_same_path_still_fails() {
             app.background_executor(),
             Arc::new(AuthState::new_for_test()),
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -626,7 +631,7 @@ fn test_create_edit_for_existing_file() {
             background_executor,
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -670,7 +675,7 @@ fn test_create_with_overwrite_replaces_existing_file() {
             app.background_executor(),
             Arc::new(AuthState::new_for_test()),
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -707,7 +712,7 @@ fn test_create_with_overwrite_on_nonexistent_file_creates_normally() {
             app.background_executor(),
             Arc::new(AuthState::new_for_test()),
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -890,7 +895,7 @@ fn test_apply_v4a_edits_simple_match() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -941,7 +946,7 @@ fn test_apply_v4a_edits_with_jump_context() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -986,7 +991,7 @@ fn test_apply_v4a_edits_no_match() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1035,7 +1040,7 @@ fn test_apply_v4a_edits_noop() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1090,7 +1095,7 @@ fn test_apply_v4a_edits_multiline_change() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1140,7 +1145,7 @@ fn test_apply_v4a_edits_nested_jump_context() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1182,7 +1187,7 @@ fn test_apply_v4a_edits_missing_file() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1227,7 +1232,7 @@ fn test_apply_v4a_edits_empty_context() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1277,7 +1282,7 @@ fn test_apply_v4a_rename_to_nonexistent_file() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1340,7 +1345,7 @@ fn test_apply_v4a_rename_to_existing_file() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
@@ -1420,7 +1425,7 @@ fn test_apply_v4a_rename_to_existing_file_no_deltas() {
             app.background_executor(),
             auth_state,
             false,
-            |path| async move { FileReadResult::from(std::fs::read_to_string(path)) },
+            read_file_for_test,
         )
         .await;
 
