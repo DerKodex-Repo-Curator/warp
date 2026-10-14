@@ -16,6 +16,14 @@ on:
         options:
           - self_hosted
           - github_hosted
+      windows_codegen_policy:
+        description: Windows warp package test-profile codegen experiment
+        required: true
+        type: choice
+        default: default
+        options:
+          - default
+          - cgu256
   workflow_call:
 
 name: Warp CI
@@ -135,6 +143,7 @@ jobs:
       HAS_GCP_AUTH: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       EXCLUDE_SSH_TESTS_FILTER: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && ' and not test(/(_ssh_|remote_server)/)' || '' }}
       EXCLUDE_REMOTE_SERVER_TESTS_FILTER: " and not test(/remote_server/)"
+      WINDOWS_CI_CODEGEN_POLICY: ${{ inputs.windows_codegen_policy || 'default' }}
     strategy:
       fail-fast: false
       matrix:
@@ -288,7 +297,7 @@ jobs:
       - name: Compile tests
         # `--timings` makes cargo write a per-crate build timeline to
         # target/cargo-timings/cargo-timing.html without changing the build.
-        run: ${{ matrix.os == 'windows' && './script/windows/measure_ci_performance.ps1 -Mode Run -Phase compile' || format('cargo nextest run {0} --no-run --timings', env.WORKSPACE_TEST_ARGS) }}
+        run: ${{ matrix.os == 'windows' && './script/windows/measure_ci_performance.ps1 -Mode Run -Phase compile -CodegenPolicy $env:WINDOWS_CI_CODEGEN_POLICY' || format('cargo nextest run {0} --no-run --timings', env.WORKSPACE_TEST_ARGS) }}
         env:
           # Attach the GitHub auth token so that requests to the GitHub API
           # don't get rate limited during compilation (e.g.: retrieving
@@ -315,7 +324,7 @@ jobs:
         # that we don't bother running these first tests if test compilation
         # fails).
         if: success()
-        run: ${{ matrix.os == 'windows' && './script/windows/measure_ci_performance.ps1 -Mode Run -Phase unit-tests' || format('cargo nextest run {0} -E "not package(integration)"', env.WORKSPACE_TEST_ARGS) }}
+        run: ${{ matrix.os == 'windows' && './script/windows/measure_ci_performance.ps1 -Mode Run -Phase unit-tests -CodegenPolicy $env:WINDOWS_CI_CODEGEN_POLICY' || format('cargo nextest run {0} -E "not package(integration)"', env.WORKSPACE_TEST_ARGS) }}
         env:
           # Unit tests may end up spawning a shell, but shouldn't care which
           # shell it is.  We'll use zsh, as it has the shortest bootstrap times

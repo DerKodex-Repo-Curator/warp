@@ -8,6 +8,8 @@ param(
     [string]$OutputDirectory,
     [ValidateSet('compile', 'after-compile', 'unit-tests')]
     [string]$Phase = 'compile',
+    [ValidateSet('default', 'cgu256')]
+    [string]$CodegenPolicy = 'default',
     [ValidateRange(1, 60)]
     [int]$IntervalSeconds = 5,
     [ValidateRange(1, 2400)]
@@ -21,7 +23,7 @@ if ($Mode -eq 'Run') {
     }
     $collectorJob = $null
     try {
-        & $PSCommandPath -Mode Start -OutputDirectory $OutputDirectory -IntervalSeconds $IntervalSeconds -MaxDurationSeconds $MaxDurationSeconds
+        & $PSCommandPath -Mode Start -OutputDirectory $OutputDirectory -IntervalSeconds $IntervalSeconds -MaxDurationSeconds $MaxDurationSeconds -CodegenPolicy $CodegenPolicy
         if ($Phase -eq 'unit-tests') {
             & $PSCommandPath -Mode Phase -Phase unit-tests -OutputDirectory $OutputDirectory
         }
@@ -43,6 +45,9 @@ if ($Mode -eq 'Run') {
             $arguments += @('-E', 'not package(integration)')
         } else {
             throw 'Run requires compile or unit-tests phase.'
+        }
+        if ($CodegenPolicy -eq 'cgu256') {
+            $arguments += @('--config', 'profile.test.package.warp.codegen-units=256')
         }
         # Read the native status explicitly rather than turning it into a PowerShell exception.
         $PSNativeCommandUseErrorActionPreference = $false
@@ -132,6 +137,9 @@ try {
                 sample_interval_seconds = $IntervalSeconds
                 maximum_duration_seconds = $MaxDurationSeconds
                 powershell = $PSVersionTable.PSVersion.ToString()
+                codegen_policy = $CodegenPolicy
+                codegen_package = 'warp'
+                codegen_units_override = $(if ($CodegenPolicy -eq 'cgu256') { 256 } else { $null })
             }
             try {
                 $system = Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 5
@@ -228,6 +236,11 @@ try {
                 Write-DiagnosticRecord (Join-Path $OutputDirectory 'phases.jsonl') @{ utc = [DateTime]::UtcNow.ToString('o'); phase = $Phase }
                 if ($Phase -eq 'after-compile' -and (Test-Path -LiteralPath 'target/cargo-timings/cargo-timing.html')) {
                     Copy-Item -LiteralPath 'target/cargo-timings/cargo-timing.html' -Destination (Join-Path $OutputDirectory 'cargo-timing.html')
+                }
+                if ($Phase -eq 'after-compile') {
+                    $binaries = @(Get-ChildItem -Path 'target/debug/deps/warp-*.exe' -File -ErrorAction SilentlyContinue |
+                            Select-Object Name, Length)
+                    ConvertTo-Json -InputObject $binaries | Set-Content -LiteralPath (Join-Path $OutputDirectory 'warp-binaries.json') -Encoding utf8
                 }
             }
         }
