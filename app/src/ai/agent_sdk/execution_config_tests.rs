@@ -71,6 +71,20 @@ fn execution_repositories_keep_individual_origin_policy_and_refs() {
         Some(RepositoryHeadRef::CommitSha(sha)) if sha == "abcdef"
     ));
     assert_eq!(resolved[1].clone_from.as_ref().unwrap().owner, "source");
+    let rest: Vec<ResolvedRepository> = serde_json::from_value(serde_json::json!([
+        {
+            "forge": "GITHUB", "owner": "owner", "name": "first",
+            "preserve_origin": true,
+        },
+        {
+            "forge": "GITLAB", "owner": "owner", "name": "second",
+            "ref": {"type": "COMMIT_SHA", "value": "abcdef"},
+            "clone_from": {"code_forge": "GITLAB", "owner": "source", "repo": "second"},
+            "preserve_origin": false,
+        },
+    ]))
+    .unwrap();
+    assert_eq!(resolved, rest);
 }
 
 #[test]

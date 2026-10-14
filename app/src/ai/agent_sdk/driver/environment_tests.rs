@@ -17,31 +17,33 @@ use super::super::environment_checkout_protocol::{
 };
 use super::{
     CloneFailureIdentityDiagnostics, PrepareEnvironmentError, RepositoryCloneRequest,
-    ResolvedRepository, SETUP_COMMAND_OUTPUT_TRUNCATION_MARKER, SetupCommandPhase,
-    WorkspaceConfiguration, await_setup_phase, build_checkout_helper_command,
-    build_deferred_repos_instruction, environment_snapshot, merge_repos_deduped,
-    parse_resolved_head_sha, read_checkout_report, reported_resolved_heads,
-    repository_clone_requests, setup_command_failure, single_repo_name,
+    SETUP_COMMAND_OUTPUT_TRUNCATION_MARKER, SetupCommandPhase, WorkspaceConfiguration,
+    await_setup_phase, build_checkout_helper_command, build_deferred_repos_instruction,
+    environment_snapshot, merge_repos_deduped, parse_resolved_head_sha, read_checkout_report,
+    reported_resolved_heads, repository_clone_requests, setup_command_failure, single_repo_name,
     validate_repository_preparation_overrides,
 };
 use crate::ai::agent_sdk::driver::AgentDriverError;
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
+use crate::server::server_api::repository::ResolvedRepository;
 use crate::terminal::shell::ShellType;
 
 #[test]
 fn resolved_repositories_apply_origin_policy_per_checkout() {
-    let first = SourceRepo::new(CodeForge::GitHub, "owner".into(), "first".into());
-    let second = SourceRepo::new(CodeForge::GitLab, "owner".into(), "second".into());
     let workspace = WorkspaceConfiguration::from_resolved(
         vec![
             ResolvedRepository {
-                source: first,
+                forge: CodeForge::GitHub,
+                owner: "owner".into(),
+                name: "first".into(),
                 checkout: None,
                 clone_from: None,
                 preserve_origin: true,
             },
             ResolvedRepository {
-                source: second,
+                forge: CodeForge::GitLab,
+                owner: "owner".into(),
+                name: "second".into(),
                 checkout: Some(RepositoryHeadRef::Branch("feature".into())),
                 clone_from: Some(SourceRepo::new(
                     CodeForge::GitLab,
@@ -67,7 +69,9 @@ fn resolved_repositories_apply_origin_policy_per_checkout() {
 fn duplicate_resolved_repositories_fail_before_clone() {
     let repositories = (0..2)
         .map(|_| ResolvedRepository {
-            source: SourceRepo::new(CodeForge::GitHub, "owner".into(), "repo".into()),
+            forge: CodeForge::GitHub,
+            owner: "owner".into(),
+            name: "repo".into(),
             checkout: None,
             clone_from: None,
             preserve_origin: true,
@@ -718,7 +722,9 @@ fn resolved_workspace_keeps_deferred_inventory_out_of_preparation() {
     let deferred = vec![repo(CodeForge::GitLab, "other", "billing")];
     let workspace = WorkspaceConfiguration::from_resolved(
         vec![ResolvedRepository {
-            source: eager.clone(),
+            forge: CodeForge::GitHub,
+            owner: eager.owner.clone(),
+            name: eager.repo.clone(),
             checkout: None,
             clone_from: None,
             preserve_origin: true,
@@ -742,13 +748,17 @@ fn resolved_repositories_reject_clone_directory_collisions() {
     let result = WorkspaceConfiguration::from_resolved(
         vec![
             ResolvedRepository {
-                source: repo(CodeForge::GitHub, "a", "widget"),
+                forge: CodeForge::GitHub,
+                owner: "a".into(),
+                name: "widget".into(),
                 checkout: None,
                 clone_from: None,
                 preserve_origin: true,
             },
             ResolvedRepository {
-                source: repo(CodeForge::GitLab, "b", "widget"),
+                forge: CodeForge::GitLab,
+                owner: "b".into(),
+                name: "widget".into(),
                 checkout: None,
                 clone_from: None,
                 preserve_origin: true,

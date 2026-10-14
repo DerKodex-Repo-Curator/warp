@@ -13,12 +13,12 @@ use warp_graphql::queries::execution_config::{
     SourceRepo as ConfigSourceRepo,
 };
 
-use super::driver::environment::ResolvedRepository;
 use super::{config_file, mcp_config};
 use crate::ai::cloud_environments::{
     AwsProviderConfig, GcpProviderConfig, ProvidersConfig, SourceRepo,
 };
 use crate::server::ids::ServerId;
+use crate::server::server_api::repository::ResolvedRepository;
 use crate::workspaces::user_workspaces::HeadlessTeamScope;
 
 pub(super) fn team_scope(team_id: Option<&cynic::Id>) -> anyhow::Result<HeadlessTeamScope> {
@@ -72,7 +72,7 @@ pub(super) fn repositories(
     repositories
         .into_iter()
         .map(|repo| {
-            let source = SourceRepo::new(forge(repo.forge)?, repo.owner, repo.name);
+            let forge = forge(repo.forge)?;
             let checkout = repo
                 .ref_
                 .map(|reference| match reference.type_ {
@@ -89,7 +89,9 @@ pub(super) fn repositories(
                 .transpose()?;
             let clone_from = repo.clone_from.map(source_repo).transpose()?;
             Ok(ResolvedRepository {
-                source,
+                forge,
+                owner: repo.owner,
+                name: repo.name,
                 checkout,
                 clone_from,
                 preserve_origin: repo.preserve_origin,
