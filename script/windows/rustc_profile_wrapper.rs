@@ -89,6 +89,135 @@ fn epoch_milliseconds() -> u128 {
         .as_millis()
 }
 
+fn option_value(arguments: &[OsString], option: &str) -> io::Result<OsString> {
+    let prefix = format!("{option}=");
+    let mut values = arguments.iter().enumerate().filter_map(|(index, value)| {
+        if value == option {
+            arguments.get(index + 1).cloned()
+        } else {
+            value
+                .to_str()
+                .and_then(|value| value.strip_prefix(&prefix))
+                .map(OsString::from)
+        }
+    });
+    match (values.next(), values.next()) {
+        (Some(value), None) => Ok(value),
+        _ => Err(io::Error::other(
+            "Missing or ambiguous compiler output directory.",
+        )),
+    }
+}
+
+fn ir_filestem(arguments: &[OsString]) -> io::Result<String> {
+    let mut extra = None;
+    for (index, argument) in arguments.iter().enumerate() {
+        let value = if argument == "-C" {
+            arguments.get(index + 1).and_then(|value| value.to_str())
+        } else {
+            argument.to_str().and_then(|value| value.strip_prefix("-C"))
+        };
+        if let Some(value) = value.and_then(|value| value.strip_prefix("extra-filename=")) {
+            if extra.is_some()
+                || !value.starts_with('-')
+                || !value
+                    .chars()
+                    .all(|value| value.is_ascii_alphanumeric() || value == '-')
+            {
+                return Err(io::Error::other("Unexpected compiler filename suffix."));
+            }
+            extra = Some(value);
+        }
+    }
+    let suffix =
+        extra.ok_or_else(|| io::Error::other("Missing Cargo compiler filename suffix."))?;
+    Ok(format!("warp{suffix}"))
+}
+
+fn owned_ir_files(directory: &Path, filestem: &str) -> io::Result<Vec<std::path::PathBuf>> {
+    let prefix = format!("{filestem}.");
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".rcgu.ll"))
+            && entry.file_type()?.is_file()
+        {
+            files.push(entry.path());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn inventory_compiler(
+    compiler: &OsStr,
+    arguments: &[OsString],
+    selection: &[OsString],
+    directory: &Path,
+) -> io::Result<i32> {
+    if directory.join("warp-libtest.started").exists() {
+        let _ = fs::write(directory.join("duplicate-match"), []);
+        return Err(io::Error::other(
+            "More than one libtest matched IR collection.",
+        ));
+    }
+    if selection.iter().any(|argument| argument == "-o") {
+        return Err(io::Error::other(
+            "Explicit output filenames would change codegen-unit behavior.",
+        ));
+    }
+    let output = Path::new(&option_value(selection, "--out-dir")?).canonicalize()?;
+    let filestem = ir_filestem(selection)?;
+    if !owned_ir_files(&output, &filestem)?.is_empty() {
+        return Err(io::Error::other(
+            "Existing root IR files prevent exclusive ownership.",
+        ));
+    }
+    let output_text = output
+        .to_str()
+        .filter(|value| !value.contains(['\r', '\n']))
+        .ok_or_else(|| io::Error::other("Unsupported compiler output path."))?;
+    fs::create_dir_all(directory)?;
+    let mut marker = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(directory.join("warp-libtest.started"))?;
+    let started = epoch_milliseconds();
+    write!(marker, "{started}")?;
+    // This is execution-only ownership data, never part of the published artifact.
+    fs::write(
+        directory.join("ir-owner.txt"),
+        format!("warp-ir-owner-v1\n{output_text}\n{filestem}\n"),
+    )?;
+    let clock = Instant::now();
+    let mut child = Command::new(compiler)
+        .args(arguments)
+        .arg("--emit=llvm-ir")
+        .env_remove("RUSTC_BOOTSTRAP")
+        .spawn()?;
+    let pid = child.id();
+    let code = child.wait()?.code().unwrap_or(1);
+    let elapsed = clock.elapsed().as_secs_f64();
+    let finished = epoch_milliseconds();
+    let files = owned_ir_files(&output, &filestem)
+        .map(|files| files.len())
+        .ok();
+    let file_count = files.map_or_else(|| "null".to_owned(), |count| count.to_string());
+    let metadata = format!(
+        "{{\"crate\":\"warp\",\"source\":\"app/src/lib.rs\",\"libtest\":true,\
+         \"mode\":\"ir-inventory\",\"pid\":{pid},\"started_epoch_ms\":{started},\
+         \"finished_epoch_ms\":{finished},\"elapsed_seconds\":{elapsed},\
+         \"compiler_exit_code\":{code},\"ir_file_count\":{file_count},\
+         \"bootstrap_scope\":\"none\",\"existing_outputs_preserved\":true}}\n"
+    );
+    if fs::write(directory.join("invocation.json"), metadata).is_err() {
+        eprintln!("Could not save IR inventory metadata.");
+    }
+    Ok(code)
+}
 fn profile_compiler(compiler: &OsStr, arguments: &[OsString], directory: &Path) -> io::Result<i32> {
     fs::create_dir_all(directory.join("raw"))?;
     let started = epoch_milliseconds();
@@ -184,7 +313,13 @@ fn run() -> io::Result<i32> {
     }
     let directory = std::env::var_os("WARP_CI_RUSTC_PROFILE_DIR")
         .ok_or_else(|| io::Error::other("Missing compiler profiling directory."))?;
-    profile_compiler(&compiler, &arguments, Path::new(&directory))
+    match std::env::var("WARP_CI_DIAGNOSTIC_MODE").as_deref() {
+        Ok("ir-inventory") => {
+            inventory_compiler(&compiler, &arguments, &selection, Path::new(&directory))
+        }
+        Ok("profile") | Err(_) => profile_compiler(&compiler, &arguments, Path::new(&directory)),
+        _ => Err(io::Error::other("Unsupported compiler diagnostic mode.")),
+    }
 }
 
 fn main() {

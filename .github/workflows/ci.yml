@@ -24,6 +24,7 @@ on:
         options:
           - 'off'
           - warp-libtest
+          - warp-libtest-ir
   workflow_call:
 
 name: Warp CI
@@ -304,6 +305,11 @@ jobs:
           # Sentry SDK binary releases).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Collect private Windows libtest IR inventory
+        if: ${{ matrix.os == 'windows' && inputs.compiler_profile == 'warp-libtest-ir' && !cancelled() }}
+        shell: pwsh
+        run: ./script/windows/profile_libtest_compile.ps1 -Mode Publish -CompilerProfile warp-libtest-ir
+
       - name: Report macOS cache volume and machine stats after compiling
         if: ${{ matrix.os == 'macos' && !cancelled() }}
         continue-on-error: true
@@ -338,6 +344,15 @@ jobs:
         with:
           name: windows-ci-performance-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/warp-windows-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Windows IR-size inventory
+        if: ${{ matrix.os == 'windows' && inputs.compiler_profile == 'warp-libtest-ir' && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: warp-libtest-ir-inventory-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/warp-libtest-ir-${{ github.run_id }}-${{ github.run_attempt }}/artifact/ir-inventory.json
           if-no-files-found: warn
           retention-days: 7
 

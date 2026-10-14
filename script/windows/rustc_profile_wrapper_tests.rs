@@ -127,3 +127,18 @@ fn requires_the_exact_expected_source_file_when_configured() {
     fs::remove_file(source).unwrap();
     fs::remove_file(other).unwrap();
 }
+
+#[test]
+fn requires_unambiguous_inventory_output_scope() {
+    assert_eq!(
+        option_value(&arguments(&["--out-dir", "a directory"]), "--out-dir").unwrap(),
+        OsString::from("a directory")
+    );
+    assert!(option_value(&arguments(&["--out-dir=a", "--out-dir=b"]), "--out-dir").is_err());
+    assert_eq!(
+        ir_filestem(&arguments(&["-C", "extra-filename=-abcdef0123"])).unwrap(),
+        "warp-abcdef0123"
+    );
+    assert!(ir_filestem(&arguments(&["-Cextra-filename=-../other"])).is_err());
+    assert!(ir_filestem(&arguments(&["-Cextra-filename=-a", "-Cextra-filename=-b"])).is_err());
+}

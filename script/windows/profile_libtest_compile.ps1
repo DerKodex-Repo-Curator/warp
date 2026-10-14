@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet('Run', 'Publish')]
     [string]$Mode,
-    [ValidateSet('off', 'warp-libtest')]
+    [ValidateSet('off', 'warp-libtest', 'warp-libtest-ir')]
     [string]$CompilerProfile = 'off',
     [string]$OutputDirectory,
     [ValidateRange(1, 2147483648)]
@@ -17,17 +17,18 @@ if ($Mode -eq 'Run' -and $CompilerProfile -eq 'off') {
     & $collector -Mode Run -Phase compile
     exit $LASTEXITCODE
 }
-if ($CompilerProfile -ne 'warp-libtest') {
+if ($CompilerProfile -eq 'off') {
     throw 'Publishing requires an enabled compiler profile.'
 }
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    $OutputDirectory = Join-Path $env:RUNNER_TEMP "warp-libtest-profile-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+    $prefix = if ($CompilerProfile -eq 'warp-libtest-ir') { 'warp-libtest-ir' } else { 'warp-libtest-profile' }
+    $OutputDirectory = Join-Path $env:RUNNER_TEMP "$prefix-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
 }
 $capture = Join-Path $OutputDirectory 'capture'
 $work = Join-Path $OutputDirectory 'work'
 
 if ($Mode -eq 'Run') {
-    foreach ($name in @('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTC_BOOTSTRAP', 'WARP_CI_RUSTC_PROFILE_DIR', 'WARP_CI_RUSTC_SOURCE')) {
+    foreach ($name in @('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'RUSTC_BOOTSTRAP', 'WARP_CI_RUSTC_PROFILE_DIR', 'WARP_CI_RUSTC_SOURCE', 'WARP_CI_DIAGNOSTIC_MODE')) {
         if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
             throw "Unexpected existing $name configuration."
         }
@@ -43,34 +44,65 @@ if ($Mode -eq 'Run') {
     @{
         profile = $CompilerProfile
         rustc = $version
-        events = 'default'
-        counter = 'wall-time'
-        bootstrap_scope = 'selected-compiler-child'
+        events = $(if ($CompilerProfile -eq 'warp-libtest-ir') { 'none' } else { 'default' })
+        counter = $(if ($CompilerProfile -eq 'warp-libtest-ir') { 'ir-size' } else { 'wall-time' })
+        bootstrap_scope = $(if ($CompilerProfile -eq 'warp-libtest-ir') { 'none' } else { 'selected-compiler-child' })
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'setup.json') -Encoding utf8
     $wrapper = Join-Path $work 'rustc-profile-wrapper.exe'
     & rustc --edition 2024 --crate-name warp_ci_rustc_profile_wrapper (Join-Path $PSScriptRoot 'rustc_profile_wrapper.rs') -o $wrapper
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
+    if ($CompilerProfile -eq 'warp-libtest-ir') {
+        $tool = Join-Path $work 'normalizer'
+        New-Item -ItemType Directory -Path (Join-Path $tool 'src') -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'ir_name_normalizer.rs') -Destination (Join-Path $tool 'src/main.rs')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'ir_name_normalizer_tests.rs') -Destination (Join-Path $tool 'src/ir_name_normalizer_tests.rs')
+        @'
+[package]
+name = "warp_ir_name_normalizer"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+rustc-demangle = "=0.1.27"
+serde_json = "=1.0.150"
+[workspace]
+'@ | Set-Content -LiteralPath (Join-Path $tool 'Cargo.toml') -Encoding utf8
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../Cargo.lock') -Destination (Join-Path $tool 'Cargo.lock')
+        & cargo build --release --offline --manifest-path (Join-Path $tool 'Cargo.toml') --target-dir (Join-Path $work 'normalizer-target')
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    }
     $previousWrapper = $env:RUSTC_WRAPPER
     $previousDirectory = $env:WARP_CI_RUSTC_PROFILE_DIR
     $previousSource = $env:WARP_CI_RUSTC_SOURCE
+    $previousMode = $env:WARP_CI_DIAGNOSTIC_MODE
     $expectedSource = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../app/src/lib.rs')).Path
     $code = 1
     try {
         $env:RUSTC_WRAPPER = $wrapper
         $env:WARP_CI_RUSTC_PROFILE_DIR = $capture
         $env:WARP_CI_RUSTC_SOURCE = $expectedSource
+        $env:WARP_CI_DIAGNOSTIC_MODE = if ($CompilerProfile -eq 'warp-libtest-ir') { 'ir-inventory' } else { 'profile' }
         & $collector -Mode Run -Phase compile
         $code = $LASTEXITCODE
     } finally {
         $env:RUSTC_WRAPPER = $previousWrapper
         $env:WARP_CI_RUSTC_PROFILE_DIR = $previousDirectory
         $env:WARP_CI_RUSTC_SOURCE = $previousSource
+        $env:WARP_CI_DIAGNOSTIC_MODE = $previousMode
     }
     exit $code
 }
 
+if ($CompilerProfile -eq 'warp-libtest-ir') {
+    $binary = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'warp_ir_name_normalizer.exe' } else { 'warp_ir_name_normalizer' }
+    $normalizer = Join-Path $work "normalizer-target/release/$binary"
+    $python = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+    & $python (Join-Path $PSScriptRoot 'ir_inventory.py') $capture (Join-Path $OutputDirectory 'artifact') $normalizer
+    exit $LASTEXITCODE
+}
 $publish = Join-Path $OutputDirectory 'artifact'
 if (Test-Path -LiteralPath $publish) {
     throw 'Compiler profile publication directory already exists.'
