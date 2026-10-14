@@ -185,13 +185,14 @@ fn history_detail_controls_survive_refresh_independently_and_follow_display_unit
         assert!(
             !first_text.contains("Context window") && !first_text.contains("View account usage")
         );
-        assert!(!text(&second, &app).contains("Input tokens"));
-        assert!(!first.read(&app, |view, _| {
-            view.sections.tool_call_summary_section_expanded
-        }));
-        assert!(second.read(&app, |view, _| {
-            view.sections.tool_call_summary_section_expanded
-        }));
+        let second_text = text(&second, &app);
+        assert!(!second_text.contains("Input tokens"));
+        assert!(first_text.contains("14 tool calls"));
+        assert!(!first_text.contains("Files changed"));
+        assert!(!first_text.contains("Commands executed"));
+        assert!(!second_text.contains("14 tool calls"));
+        assert!(second_text.contains("Files changed"));
+        assert!(second_text.contains("Commands executed"));
         set_usage_display_unit(&mut app, UsageDisplayUnit::Dollars);
         assert!(text(&first, &app).contains("$0.42"));
         assert!(text(&second, &app).contains("$0.42"));
