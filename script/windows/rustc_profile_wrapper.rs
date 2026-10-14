@@ -1,6 +1,7 @@
 // CI-only tooling uses native processes and wall-clock timing, not application abstractions.
 #![allow(clippy::disallowed_types)]
 
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -37,6 +38,22 @@ fn is_warp_libtest(arguments: &[OsString]) -> bool {
     matches!((names.next(), names.next()), (Some(name), None) if name == "warp")
         && arguments.iter().any(|argument| argument == "--test")
         && arguments.iter().any(|argument| is_app_library(argument))
+}
+
+fn selection_arguments(arguments: &[OsString]) -> io::Result<Cow<'_, [OsString]>> {
+    // Cargo's Windows command-length fallback keeps rustc's arguments in a temporary UTF-8 file.
+    if let [argument] = arguments
+        && let Some(file) = argument.to_str().and_then(|value| value.strip_prefix('@'))
+    {
+        if fs::metadata(file)?.len() > 4 * 1024 * 1024 {
+            return Err(io::Error::other(
+                "Compiler argument file exceeds the profiling selection limit.",
+            ));
+        }
+        let contents = fs::read_to_string(file)?;
+        return Ok(Cow::Owned(contents.lines().map(OsString::from).collect()));
+    }
+    Ok(Cow::Borrowed(arguments))
 }
 
 fn time_pass_record(line: &[u8]) -> Option<&[u8]> {
@@ -138,7 +155,8 @@ fn run() -> io::Result<i32> {
         .next()
         .ok_or_else(|| io::Error::other("Missing compiler executable."))?;
     let arguments: Vec<_> = arguments.collect();
-    if !is_warp_libtest(&arguments) {
+    let selection = selection_arguments(&arguments)?;
+    if !is_warp_libtest(&selection) {
         return Ok(Command::new(compiler)
             .args(arguments)
             .status()?

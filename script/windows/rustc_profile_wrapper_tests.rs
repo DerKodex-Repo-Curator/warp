@@ -81,3 +81,23 @@ fn retains_only_bounded_time_pass_json_records() {
     .concat();
     assert_eq!(time_pass_record(&oversized), None);
 }
+
+#[test]
+fn selects_from_a_cargo_response_file_without_rewriting_it() {
+    let path = std::env::temp_dir().join(format!(
+        "warp-compiler-args-{}-{}.txt",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let contents = "--crate-name\r\nwarp\r\n--test\r\nC:\\runner space\\warp\\app\\src\\lib.rs\r\n";
+    fs::write(&path, contents).unwrap();
+    let mut argument = OsString::from("@");
+    argument.push(&path);
+    let original = vec![argument];
+    assert!(is_warp_libtest(&selection_arguments(&original).unwrap()));
+    assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+    fs::remove_file(path).unwrap();
+}
