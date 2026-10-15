@@ -353,6 +353,10 @@ pub struct BlocklistAIController {
     /// harness driving it instead of being sent to Warp's agent.
     external_harness_prompt_sink:
         Option<async_channel::Sender<external_harness::ExternalHarnessPrompt>>,
+    /// When set, cancellations of the bound native conversation are handed to the external
+    /// harness driving it instead of interrupting the terminal.
+    external_harness_cancel_sink:
+        Option<async_channel::Sender<external_harness::ExternalHarnessCancel>>,
 
     /// Ambient agent task ID attached to this controller. This is a property of the controller, and not an individual
     /// conversation, because the ambient agent task driver owns the entire Warp window working on a task, and any
@@ -384,6 +388,17 @@ pub struct BlocklistAIController {
             Option<PassiveSuggestionTrigger>,
         )>,
     >,
+}
+
+/// Who cancels a conversation's turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CancellationRoute {
+    /// This client: its in-flight request stream, pending actions, and (for the caller) any
+    /// agent-requested command running in the terminal.
+    Local,
+    /// The external harness driving the conversation, which interrupts its agent over its own
+    /// protocol and settles the conversation status afterwards.
+    ExternalHarness,
 }
 
 enum InputQueryType {
@@ -723,6 +738,7 @@ impl BlocklistAIController {
             shared_session_state: shared_session::SharedSessionState::default(),
             native_prompt_conversation_id: None,
             external_harness_prompt_sink: None,
+            external_harness_cancel_sink: None,
             ambient_agent_task_id: None,
             attachments_download_dir: None,
             pending_auto_resume_handles: HashMap::new(),
@@ -3284,6 +3300,19 @@ impl BlocklistAIController {
         reason: CancellationReason,
         ctx: &mut ModelContext<Self>,
     ) {
+        self.cancel_conversation_progress_routed(conversation_id, reason, ctx);
+    }
+
+    /// [`Self::cancel_conversation_progress`], reporting who ended up cancelling the turn. A
+    /// conversation driven by an external harness has its turn interrupted by that harness,
+    /// which settles the conversation status itself. The bookkeeping that is independent of who
+    /// runs the turn happens either way.
+    pub(crate) fn cancel_conversation_progress_routed(
+        &mut self,
+        conversation_id: AIConversationId,
+        reason: CancellationReason,
+        ctx: &mut ModelContext<Self>,
+    ) -> CancellationRoute {
         self.commands_interrupted_for_injection
             .remove(&conversation_id);
         // Restore the user's keyboard focus if a background computer-use session is still active
@@ -3307,6 +3336,10 @@ impl BlocklistAIController {
         QueuedQueryModel::handle(ctx).update(ctx, |model, ctx| {
             model.remove_pending_lrc_rows(conversation_id, ctx);
         });
+
+        if self.cancel_via_external_harness(conversation_id, ctx) {
+            return CancellationRoute::ExternalHarness;
+        }
 
         if !self
             .in_flight_response_streams
@@ -3345,6 +3378,7 @@ impl BlocklistAIController {
             });
             self.set_input_mode_for_cancellation(ctx);
         }
+        CancellationRoute::Local
     }
 
     /// Finalizes a conversation as a terminal failure because an agent-issued

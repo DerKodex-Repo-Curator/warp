@@ -588,12 +588,18 @@ enum HarnessIdleAction {
 }
 
 /// [`idle_window_for_terminal_status`] for a harness whose progress is the status of the native
-/// conversation it drives.
+/// conversation it drives. While the harness `is_settling_turn` (see
+/// [`HarnessRunner::is_settling_turn`]) a settled status is transitional, so nothing is
+/// scheduled on it; the turn that follows cancels any idle anyway.
 fn harness_idle_action_for_conversation_status(
     status: &ConversationStatus,
     idle_on_complete: Option<Duration>,
     idle_on_fail: Option<Duration>,
+    is_settling_turn: bool,
 ) -> HarnessIdleAction {
+    if is_settling_turn && !matches!(status, ConversationStatus::InProgress) {
+        return HarnessIdleAction::Ignore;
+    }
     match status {
         ConversationStatus::InProgress => HarnessIdleAction::CancelIdle,
         ConversationStatus::Success
@@ -4609,10 +4615,15 @@ impl AgentDriver {
             if bound_conversation_id != Some(*conversation_id) {
                 return;
             }
+            let is_settling_turn = me
+                .harness
+                .as_ref()
+                .is_some_and(|runner| runner.is_settling_turn());
             match harness_idle_action_for_conversation_status(
                 new_status,
                 me.idle_on_complete,
                 me.idle_on_fail,
+                is_settling_turn,
             ) {
                 HarnessIdleAction::CancelIdle => {
                     log::info!(
@@ -4636,7 +4647,14 @@ impl AgentDriver {
                         _ => harness_exit.complete_with_optional_idle(window, ()),
                     }
                 }
-                HarnessIdleAction::Ignore => {}
+                HarnessIdleAction::Ignore => {
+                    if is_settling_turn {
+                        log::info!(
+                            "Ambient agent harness lifecycle: event=idle_exit_deferred task_id={:?} conversation_id={conversation_id} status={new_status:?} reason=turn_settling",
+                            me.task_id
+                        );
+                    }
+                }
             }
         });
     }

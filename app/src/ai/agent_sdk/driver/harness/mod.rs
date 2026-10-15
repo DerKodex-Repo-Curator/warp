@@ -687,6 +687,13 @@ pub(crate) trait HarnessRunner: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether the harness is between a turn it has cut short and the follow-up that caused it,
+    /// or still settling an interrupt. A status change observed in that window is not the run
+    /// settling, so the driver must not schedule its exit on it.
+    fn is_settling_turn(&self) -> bool {
+        false
+    }
+
     /// Clean up any harness-owned background state after the harness exits.
     async fn cleanup(
         &self,

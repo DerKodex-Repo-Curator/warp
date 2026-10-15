@@ -652,7 +652,7 @@ fn native_conversation_status_drives_the_harness_exit_like_a_cli_session() {
     let idle_on_complete = Some(Duration::from_secs(45 * 60));
     let idle_on_fail = Some(Duration::from_secs(15 * 60));
     let action = |status: &ConversationStatus| {
-        harness_idle_action_for_conversation_status(status, idle_on_complete, idle_on_fail)
+        harness_idle_action_for_conversation_status(status, idle_on_complete, idle_on_fail, false)
     };
 
     assert_eq!(
@@ -684,7 +684,8 @@ fn native_conversation_status_drives_the_harness_exit_like_a_cli_session() {
         harness_idle_action_for_conversation_status(
             &ConversationStatus::Error,
             idle_on_complete,
-            None
+            None,
+            false
         ),
         HarnessIdleAction::Exit {
             window: None,
@@ -699,6 +700,46 @@ fn native_conversation_status_drives_the_harness_exit_like_a_cli_session() {
     assert_eq!(
         action(&ConversationStatus::TransientError),
         HarnessIdleAction::Ignore
+    );
+}
+
+#[test]
+fn a_settling_harness_turn_defers_the_exit_but_not_the_idle_cancel() {
+    // A steer finishes the cancelled turn's stream (Success or Cancelled) moments before the
+    // follow-up's turn begins; with no idle window that status would end the run underneath
+    // the follow-up.
+    let settling = |status: &ConversationStatus| {
+        harness_idle_action_for_conversation_status(status, None, None, true)
+    };
+    assert_eq!(
+        settling(&ConversationStatus::Success),
+        HarnessIdleAction::Ignore
+    );
+    assert_eq!(
+        settling(&ConversationStatus::Cancelled),
+        HarnessIdleAction::Ignore
+    );
+    assert_eq!(
+        settling(&ConversationStatus::Error),
+        HarnessIdleAction::Ignore
+    );
+    assert_eq!(
+        settling(&ConversationStatus::InProgress),
+        HarnessIdleAction::CancelIdle,
+        "the follow-up's turn must still cancel a pending idle exit"
+    );
+    assert_eq!(
+        harness_idle_action_for_conversation_status(
+            &ConversationStatus::Cancelled,
+            None,
+            None,
+            false
+        ),
+        HarnessIdleAction::Exit {
+            window: None,
+            failed: false,
+        },
+        "once the harness is no longer settling, a cancelled turn ends the run as before"
     );
 }
 

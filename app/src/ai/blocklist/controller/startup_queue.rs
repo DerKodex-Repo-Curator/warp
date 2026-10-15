@@ -68,6 +68,7 @@ impl BlocklistAIController {
             return;
         };
         self.external_harness_prompt_sink = None;
+        self.external_harness_cancel_sink = None;
         let unsent_count = QueuedQueryModel::as_ref(ctx).queue(id).len();
         log::info!(
             "event=native_queue_stopped task_id={:?} terminal_id={:?} conversation_id={id} unsent_count={unsent_count}",

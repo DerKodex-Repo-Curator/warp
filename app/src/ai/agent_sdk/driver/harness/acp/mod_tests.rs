@@ -11,7 +11,7 @@ use warpui::App;
 use warpui::r#async::FutureExt as _;
 
 use super::attachments::ResolvedFile;
-use super::protocol::PromptCapabilities;
+use super::protocol::{ContentBlock, PromptCapabilities};
 use super::*;
 use crate::ai::agent_sdk::driver::harness::{HarnessKind, harness_kind};
 use crate::server::server_api::ServerApiProvider;
