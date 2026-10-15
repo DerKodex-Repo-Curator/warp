@@ -965,30 +965,16 @@ impl TurnDriver {
         log::info!("ACP turn finished; accepting follow-ups until the driver ends the run");
         let mut pending_prompt = None;
         loop {
+            if let Some(prompt) = pending_prompt.take() {
+                log::info!("Running ACP follow-up turn");
+                turn_result = self.run_follow_up(mapper, prompt).await;
+                continue;
+            }
             select! {
-                prompt = async {
-                    match pending_prompt.take() {
-                        Some(prompt) => Ok(prompt),
-                        None => self.follow_ups.recv().await,
-                    }
-                }.fuse() => match prompt {
+                prompt = self.follow_ups.recv().fuse() => match prompt {
                     Ok(prompt) => {
                         if prompt.base.as_ref().is_some_and(BaseUserQuery::is_agent_message_wake) {
-                            // Consecutive wakes are equivalent: each reads all unread agent messages.
-                            let mut dropped = 0;
-                            while let Ok(next) = self.follow_ups.try_recv() {
-                                if next.base.as_ref().is_some_and(BaseUserQuery::is_agent_message_wake) {
-                                    dropped += 1;
-                                } else {
-                                    pending_prompt = Some(next);
-                                    break;
-                                }
-                            }
-                            if dropped > 0 {
-                                log::info!(
-                                    "Coalesced {dropped} queued agent-message wake prompts into one ACP follow-up turn"
-                                );
-                            }
+                            pending_prompt = self.drop_queued_wakes();
                         }
                         log::info!("Running ACP follow-up turn");
                         turn_result = self.run_follow_up(mapper, prompt).await;
@@ -1011,6 +997,28 @@ impl TurnDriver {
             Ok(stop_reason) => log::info!("ACP turns finished (last stop reason {stop_reason:?})"),
             Err(error) => log::warn!("ACP turns finished with an error: {error:#}"),
         }
+    }
+
+    /// Discards the agent-message wakes queued directly behind one that is about to run, and
+    /// returns the first non-wake prompt behind them so it is not lost. Consecutive wakes are
+    /// equivalent: each tells the agent to read everything unread.
+    fn drop_queued_wakes(&self) -> Option<ExternalHarnessPrompt> {
+        let mut dropped = 0;
+        let mut next_prompt = None;
+        while let Ok(next) = self.follow_ups.try_recv() {
+            if next.base.as_ref().is_some_and(BaseUserQuery::is_agent_message_wake) {
+                dropped += 1;
+            } else {
+                next_prompt = Some(next);
+                break;
+            }
+        }
+        if dropped > 0 {
+            log::info!(
+                "Coalesced {dropped} queued agent-message wake prompts into one ACP follow-up turn"
+            );
+        }
+        next_prompt
     }
 
     /// Opens a new request stream for a follow-up prompt, echoes it, and runs the turn. The
