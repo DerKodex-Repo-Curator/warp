@@ -1006,7 +1006,11 @@ impl TurnDriver {
         let mut dropped = 0;
         let mut next_prompt = None;
         while let Ok(next) = self.follow_ups.try_recv() {
-            if next.base.as_ref().is_some_and(BaseUserQuery::is_agent_message_wake) {
+            if next
+                .base
+                .as_ref()
+                .is_some_and(BaseUserQuery::is_agent_message_wake)
+            {
                 dropped += 1;
             } else {
                 next_prompt = Some(next);
