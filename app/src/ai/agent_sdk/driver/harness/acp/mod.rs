@@ -84,6 +84,7 @@ use super::{
     HarnessCleanupDisposition, HarnessRunner, JSONMCPServer, ResumePayload, SavePoint,
     ThirdPartyHarness, validate_cli_installed,
 };
+use crate::ai::agent::BaseUserQuery;
 use crate::ai::agent::api::ServerConversationToken;
 use crate::ai::agent::conversation::{AIConversation, AIConversationId};
 use crate::ai::agent_sdk::setup_observability::{SetupClientEventReporter, SetupStep};
@@ -962,10 +963,33 @@ impl TurnDriver {
         let mut turn_result = self.run_turn(mapper, initial).await;
 
         log::info!("ACP turn finished; accepting follow-ups until the driver ends the run");
+        let mut pending_prompt = None;
         loop {
             select! {
-                prompt = self.follow_ups.recv().fuse() => match prompt {
+                prompt = async {
+                    match pending_prompt.take() {
+                        Some(prompt) => Ok(prompt),
+                        None => self.follow_ups.recv().await,
+                    }
+                }.fuse() => match prompt {
                     Ok(prompt) => {
+                        if prompt.base.as_ref().is_some_and(BaseUserQuery::is_agent_message_wake) {
+                            // Consecutive wakes are equivalent: each reads all unread agent messages.
+                            let mut dropped = 0;
+                            while let Ok(next) = self.follow_ups.try_recv() {
+                                if next.base.as_ref().is_some_and(BaseUserQuery::is_agent_message_wake) {
+                                    dropped += 1;
+                                } else {
+                                    pending_prompt = Some(next);
+                                    break;
+                                }
+                            }
+                            if dropped > 0 {
+                                log::info!(
+                                    "Coalesced {dropped} queued agent-message wake prompts into one ACP follow-up turn"
+                                );
+                            }
+                        }
                         log::info!("Running ACP follow-up turn");
                         turn_result = self.run_follow_up(mapper, prompt).await;
                     }
