@@ -1,15 +1,18 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use cloud_object_client::MockObjectClient;
 use cloud_object_models::JsonSerializer;
+use futures::channel::oneshot;
 use futures_lite::future;
 use settings::{RespectUserSyncSetting, SyncToCloud};
 use warp_core::features::FeatureFlag;
 use warp_graphql::object_permissions::AccessLevel;
 use warp_graphql::scalars::time::ServerTimestamp;
+use warpui::r#async::FutureExt as _;
 use warpui::{App, ModelHandle, SingletonEntity};
 
 use super::{GetCloudObjectResponse, InitialLoadResponse, UpdateManager};
@@ -43,8 +46,9 @@ use crate::server::cloud_objects::test_utils::{
     UpdateManagerStruct, create_update_manager_struct, initialize_app, mock_server_api,
 };
 use crate::server::cloud_objects::update_manager::{
-    FetchSingleObjectOption, GenericStringObjectInput, InitiatedBy, ServerMetadata,
-    ServerPermissions, get_duplicate_object_name,
+    FetchSingleObjectOption, GenericStringObjectInput, InitiatedBy, ObjectOperation,
+    ObjectOperationResult, OperationSuccessType, ServerMetadata, ServerPermissions,
+    UpdateManagerEvent, get_duplicate_object_name,
 };
 use crate::server::ids::{
     ClientId, HashableId, ObjectUid, ServerId, ServerIdAndType, SyncId, ToServerId,
@@ -57,6 +61,73 @@ use crate::workflows::workflow_enum::{
 };
 use crate::workflows::{CloudWorkflow, CloudWorkflowModel, WorkflowId};
 use crate::workspaces::user_profiles::{UserProfileWithUID, UserProfiles};
+
+fn subscribe_to_operation_failure(
+    app: &mut App,
+    update_manager: &ModelHandle<UpdateManager>,
+    operation: ObjectOperation,
+    id: SyncId,
+) -> impl Future<Output = ()> + use<> {
+    let (client_id, server_id) = match id {
+        SyncId::ClientId(id) => (Some(id), None),
+        SyncId::ServerId(id) => (None, Some(id)),
+    };
+    let (sender, receiver) = oneshot::channel();
+    let mut sender = Some(sender);
+    app.update(|ctx| {
+        ctx.subscribe_to_model(update_manager, move |_, event, _| {
+            if let UpdateManagerEvent::ObjectOperationComplete { result } = event
+                && result.operation == operation
+                && result.client_id == client_id
+                && result.server_id == server_id
+            {
+                assert_eq!(result.success_type, OperationSuccessType::Failure);
+                if let Some(sender) = sender.take() {
+                    sender
+                        .send(())
+                        .expect("completion receiver should still exist");
+                }
+            }
+        });
+    });
+
+    async move {
+        receiver
+            .with_timeout(Duration::from_secs(10))
+            .await
+            .expect("operation should finish all retries within the timeout")
+            .expect("operation completion subscription should remain active");
+    }
+}
+
+#[test]
+fn operation_failure_subscription_retains_completion_before_await() {
+    App::test(ASSETS, |mut app| async move {
+        initialize_app(&mut app);
+        let manager = create_update_manager_struct(&mut app, Arc::new(mock_server_api()));
+        let server_id = ServerId::from(123);
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &manager.update_manager,
+            ObjectOperation::MoveToFolder,
+            SyncId::ServerId(server_id),
+        );
+
+        manager.update_manager.update(&mut app, |_, ctx| {
+            ctx.emit(UpdateManagerEvent::ObjectOperationComplete {
+                result: ObjectOperationResult {
+                    success_type: OperationSuccessType::Failure,
+                    operation: ObjectOperation::MoveToFolder,
+                    client_id: None,
+                    server_id: Some(server_id),
+                    num_objects: None,
+                },
+            });
+        });
+
+        operation_failed.await;
+    });
+}
 
 fn create_object<K, M>(
     app: &mut App,
@@ -1648,6 +1719,14 @@ fn test_sync_state_after_creation_failure_item_not_in_sync_queue() {
             .returning(move |_| Err(anyhow::anyhow!("create failed!")));
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::Create {
+                initiated_by: InitiatedBy::User,
+            },
+            SyncId::ClientId(client_id),
+        );
 
         // create a notebook
         create_notebook(&mut app, &update_manager_struct.update_manager, client_id);
@@ -1660,8 +1739,7 @@ fn test_sync_state_after_creation_failure_item_not_in_sync_queue() {
             })
             .await;
 
-        // await long enough that all the sync queue retries are exhausted
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         // because there aren't any items in the sync queue left for this object,
         // it should be marked as errored
@@ -2561,6 +2639,12 @@ fn test_metadata_after_trash_item_failure() {
             .returning(move |_| Err(anyhow::anyhow!("trash failed!")));
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::Trash,
+            sync_id,
+        );
 
         assert_trashed_status_for_object(&mut app, &sync_id.uid(), false);
 
@@ -2574,8 +2658,7 @@ fn test_metadata_after_trash_item_failure() {
             })
             .await;
 
-        // await long enough that all the trash object retries are exhausted
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         assert_trashed_status_for_object(&mut app, &sync_id.uid(), false);
         assert_pending_status_for_object(&mut app, &sync_id.uid(), false);
@@ -5725,6 +5808,12 @@ fn test_move_object_personal_to_team_failure() {
         assert_space_for_object(&app, &sync_id.uid(), Space::Personal);
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::MoveToDrive,
+            sync_id,
+        );
 
         // Move the notebook from a personal folder to the team space.
         let type_and_id = CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Notebook);
@@ -5763,8 +5852,7 @@ fn test_move_object_personal_to_team_failure() {
             })
             .await;
 
-        // await long enough that all the move object retries are exhausted
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         assert_pending_online_only_change_for_object(&mut app, &sync_id.uid(), false);
 
@@ -6076,6 +6164,12 @@ fn test_move_workflow_with_enums_personal_to_team_failure() {
         assert_space_for_object(&app, &enum_sync_id.uid(), Space::Personal);
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::MoveToDrive,
+            workflow_sync_id,
+        );
 
         // Move the workflow from a personal folder to the team space.
         let type_and_id =
@@ -6098,8 +6192,7 @@ fn test_move_workflow_with_enums_personal_to_team_failure() {
             })
             .await;
 
-        // await long enough that all the move object retries are exhausted
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         // The workflow and enum should remain in the personal space
         assert_pending_online_only_change_for_object(&mut app, &workflow_sync_id.uid(), false);
@@ -6307,6 +6400,12 @@ fn test_move_object_root_to_folder_failure() {
         assert_root_level_for_object(&mut app, &sync_id.uid(), true);
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::MoveToFolder,
+            sync_id,
+        );
 
         // Move the notebook from the root to a folder.
         let type_and_id = CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Notebook);
@@ -6343,8 +6442,7 @@ fn test_move_object_root_to_folder_failure() {
             })
             .await;
 
-        // await long enough that all the move object retries are exhausted
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         assert_pending_online_only_change_for_object(&mut app, &sync_id.uid(), false);
 
@@ -6499,6 +6597,12 @@ fn test_move_object_folder_to_root_failure() {
         assert_folder_for_object(&app, &sync_id.uid(), Some(folder_id.into()));
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::MoveToFolder,
+            sync_id,
+        );
 
         // Move the notebook from a folder to the root.
         let type_and_id = CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Notebook);
@@ -6535,8 +6639,7 @@ fn test_move_object_folder_to_root_failure() {
             })
             .await;
 
-        // await long enough that all the move object retries are exhausted
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         assert_pending_online_only_change_for_object(&mut app, &sync_id.uid(), false);
 
@@ -6695,6 +6798,12 @@ fn test_move_object_folder_to_folder_failure() {
         assert_folder_for_object(&app, &sync_id.uid(), Some(folder_a_id.into()));
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::MoveToFolder,
+            sync_id,
+        );
 
         // Move the notebook from folder A to folder B.
         let type_and_id = CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Notebook);
@@ -6731,8 +6840,7 @@ fn test_move_object_folder_to_folder_failure() {
             })
             .await;
 
-        // await long enough that all the move object retries are exhausted
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         assert_pending_online_only_change_for_object(&mut app, &sync_id.uid(), false);
 
@@ -7471,6 +7579,12 @@ fn test_add_guest_failure() {
             .returning(move |_, _, _| Err(anyhow::anyhow!("adding guest failed")));
 
         let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let operation_failed = subscribe_to_operation_failure(
+            &mut app,
+            &update_manager_struct.update_manager,
+            ObjectOperation::UpdatePermissions,
+            sync_id,
+        );
 
         // Add the user as a guest.
         update_manager_struct
@@ -7497,7 +7611,7 @@ fn test_add_guest_failure() {
                 ctx.await_spawned_future(update_manager.spawned_futures[0])
             })
             .await;
-        warpui::r#async::Timer::after(Duration::from_secs(10)).await;
+        operation_failed.await;
 
         assert_pending_online_only_change_for_object(&mut app, &uid, false);
 
