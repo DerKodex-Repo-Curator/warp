@@ -69,7 +69,11 @@ serde_json = "=1.0.150"
 [workspace]
 '@ | Set-Content -LiteralPath (Join-Path $tool 'Cargo.toml') -Encoding utf8
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../../Cargo.lock') -Destination (Join-Path $tool 'Cargo.lock')
-        & cargo build --release --offline --manifest-path (Join-Path $tool 'Cargo.toml') --target-dir (Join-Path $work 'normalizer-target')
+        & cargo fetch --manifest-path (Join-Path $tool 'Cargo.toml')
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+        & cargo build --release --locked --offline --manifest-path (Join-Path $tool 'Cargo.toml') --target-dir (Join-Path $work 'normalizer-target')
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }
