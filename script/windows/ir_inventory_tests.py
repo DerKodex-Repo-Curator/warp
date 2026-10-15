@@ -126,6 +126,9 @@ class PublicationTests(unittest.TestCase):
                     "bootstrap_scope": "none",
                     "existing_outputs_preserved": True,
                     "ir_file_count": 1,
+                    "codegen_units": 1,
+                    "codegen_units_was_implicit": False,
+                    "incremental": False,
                 }
             )
         )
@@ -138,7 +141,10 @@ class PublicationTests(unittest.TestCase):
             )
             self.assertFalse(
                 inventory.collect(
-                    capture, root / "artifact", Path("not-used"), expected_codegen_units=1
+                    capture,
+                    root / "artifact",
+                    Path("not-used"),
+                    expected_codegen_units=1,
                 )
             )
             report = (root / "artifact/ir-inventory.json").read_text()
@@ -149,7 +155,8 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(json.loads(report)["issue"], "unsupported-instruction-record")
 
     @unittest.skipUnless(
-        os.environ.get("IR_NORMALIZER_TEST_BINARY"), "requires the temporary pinned normalizer"
+        os.environ.get("IR_NORMALIZER_TEST_BINARY"),
+        "requires the temporary pinned normalizer",
     )
     def test_success_publishes_only_normalized_names_and_counts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -174,7 +181,10 @@ class PublicationTests(unittest.TestCase):
             (capture / "duplicate-match").write_text("")
             self.assertFalse(
                 inventory.collect(
-                    capture, root / "artifact", Path("not-used"), expected_codegen_units=1
+                    capture,
+                    root / "artifact",
+                    Path("not-used"),
+                    expected_codegen_units=1,
                 )
             )
             self.assertEqual(
@@ -183,6 +193,61 @@ class PublicationTests(unittest.TestCase):
             )
             self.assertFalse(path.exists())
             self.assertTrue(unrelated.exists())
+
+    def test_flat_ir_is_rejected_and_deleted_without_touching_unrelated_files(self):
+        for keep_cgu in (False, True):
+            with (
+                self.subTest(keep_cgu=keep_cgu),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root, capture, path, unrelated = self.make_capture(directory, IR)
+                flat = path.parent / "warp-test.ll"
+                flat.write_text(IR)
+                if not keep_cgu:
+                    path.unlink()
+                metadata_path = capture / "invocation.json"
+                metadata = json.loads(metadata_path.read_text())
+                metadata_path.write_text(json.dumps(metadata | {"ir_file_count": 1 + keep_cgu}))
+                adjacent = path.parent / "warp-test-other.ll"
+                adjacent.write_text("UNRELATED_PRIVATE_FILE")
+                self.assertFalse(
+                    inventory.collect(
+                        capture,
+                        root / "artifact",
+                        Path("not-used"),
+                        expected_codegen_units=1,
+                    )
+                )
+                data = json.loads((root / "artifact/ir-inventory.json").read_text())
+                self.assertEqual(data["issue"], "unexpected-codegen-unit-set")
+                self.assertTrue(data["owned_ir_deleted"])
+                self.assertFalse(flat.exists())
+                self.assertFalse(path.exists())
+                self.assertTrue(unrelated.exists())
+                self.assertTrue(adjacent.exists())
+
+    def test_invalid_codegen_scope_is_rejected_and_owned_ir_is_deleted(self):
+        for override in ({"codegen_units": 16}, {"incremental": True}):
+            with (
+                self.subTest(override=override),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root, capture, path, unrelated = self.make_capture(directory, IR)
+                metadata_path = capture / "invocation.json"
+                metadata = json.loads(metadata_path.read_text())
+                metadata_path.write_text(json.dumps(metadata | override))
+                self.assertFalse(
+                    inventory.collect(
+                        capture,
+                        root / "artifact",
+                        Path("not-used"),
+                        expected_codegen_units=1,
+                    )
+                )
+                data = json.loads((root / "artifact/ir-inventory.json").read_text())
+                self.assertEqual(data["issue"], "invalid-invocation")
+                self.assertFalse(path.exists())
+                self.assertTrue(unrelated.exists())
 
 
 if __name__ == "__main__":

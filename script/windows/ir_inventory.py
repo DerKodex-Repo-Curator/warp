@@ -238,8 +238,10 @@ def ownership_files(capture):
     files = sorted(
         p
         for p in directory.iterdir()
-        if p.name.startswith(stem + ".")
-        and p.name.endswith(".rcgu.ll")
+        if (
+            p.name == stem + ".ll"
+            or (p.name.startswith(stem + ".") and p.name.endswith(".rcgu.ll"))
+        )
         and p.is_file()
         and not p.is_symlink()
     )
@@ -266,6 +268,8 @@ def collect(capture, artifact, normalizer, expected_codegen_units=16):
             or invocation.get("mode") != "ir-inventory"
             or invocation.get("compiler_exit_code") != 0
             or invocation.get("bootstrap_scope") != "none"
+            or invocation.get("codegen_units") != expected_codegen_units
+            or invocation.get("incremental") is not False
             or not invocation.get("existing_outputs_preserved")
             or not (capture / "warp-libtest.started").exists()
             or (capture / "duplicate-match").exists()
@@ -278,7 +282,7 @@ def collect(capture, artifact, normalizer, expected_codegen_units=16):
             for path in files
             if (match := re.search(r"-cgu\.(\d+)\.rcgu\.ll$", path.name))
         }
-        if indices != set(range(expected_codegen_units)):
+        if len(files) != expected_codegen_units or indices != set(range(expected_codegen_units)):
             raise InventoryError("unexpected-codegen-unit-set")
         total_bytes = sum(p.stat().st_size for p in files)
         if total_bytes > MAX_IR_BYTES:
@@ -330,6 +334,9 @@ def collect(capture, artifact, normalizer, expected_codegen_units=16):
                 "elapsed_seconds",
                 "bootstrap_scope",
                 "existing_outputs_preserved",
+                "codegen_units",
+                "codegen_units_was_implicit",
+                "incremental",
             )
         },
         "top_by_instruction_records": sorted(

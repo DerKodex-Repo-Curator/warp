@@ -136,20 +136,52 @@ fn ir_filestem(arguments: &[OsString]) -> io::Result<String> {
 
 fn owned_ir_files(directory: &Path, filestem: &str) -> io::Result<Vec<std::path::PathBuf>> {
     let prefix = format!("{filestem}.");
+    let single = format!("{filestem}.ll");
     let mut files = Vec::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name
-            .to_str()
-            .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".rcgu.ll"))
-            && entry.file_type()?.is_file()
+        if name.to_str().is_some_and(|name| {
+            name == single || (name.starts_with(&prefix) && name.ends_with(".rcgu.ll"))
+        }) && entry.file_type()?.is_file()
         {
             files.push(entry.path());
         }
     }
     files.sort();
     Ok(files)
+}
+
+fn inventory_needs_explicit_cgus(arguments: &[OsString]) -> io::Result<bool> {
+    let mut codegen_units = None;
+    for (index, argument) in arguments.iter().enumerate() {
+        let value = if argument == "-C" || argument == "--codegen" {
+            arguments.get(index + 1).and_then(|value| value.to_str())
+        } else {
+            argument.to_str().and_then(|value| {
+                value
+                    .strip_prefix("-C")
+                    .or_else(|| value.strip_prefix("--codegen="))
+            })
+        };
+        let Some(value) = value else {
+            continue;
+        };
+        if value == "incremental" || value.starts_with("incremental=") {
+            return Err(io::Error::other(
+                "IR inventory requires non-incremental compilation.",
+            ));
+        }
+        if let Some(value) = value.strip_prefix("codegen-units=") {
+            if codegen_units.is_some() || value.parse::<usize>() != Ok(16) {
+                return Err(io::Error::other(
+                    "IR inventory requires exactly 16 codegen units.",
+                ));
+            }
+            codegen_units = Some(16);
+        }
+    }
+    Ok(codegen_units.is_none())
 }
 
 fn inventory_compiler(
@@ -164,11 +196,16 @@ fn inventory_compiler(
             "More than one libtest matched IR collection.",
         ));
     }
-    if selection.iter().any(|argument| argument == "-o") {
+    if selection.iter().any(|argument| {
+        argument
+            .to_str()
+            .is_some_and(|value| value.starts_with("-o"))
+    }) {
         return Err(io::Error::other(
             "Explicit output filenames would change codegen-unit behavior.",
         ));
     }
+    let codegen_units_was_implicit = inventory_needs_explicit_cgus(selection)?;
     let output = Path::new(&option_value(selection, "--out-dir")?).canonicalize()?;
     let filestem = ir_filestem(selection)?;
     if !owned_ir_files(&output, &filestem)?.is_empty() {
@@ -193,8 +230,13 @@ fn inventory_compiler(
         format!("warp-ir-owner-v1\n{output_text}\n{filestem}\n"),
     )?;
     let clock = Instant::now();
-    let mut child = Command::new(compiler)
-        .args(arguments)
+    let mut command = Command::new(compiler);
+    command.args(arguments);
+    if codegen_units_was_implicit {
+        // LLVM IR output otherwise silently replaces rustc's non-incremental default with one CGU.
+        command.arg("-Ccodegen-units=16");
+    }
+    let mut child = command
         .arg("--emit=llvm-ir")
         .env_remove("RUSTC_BOOTSTRAP")
         .spawn()?;
@@ -211,6 +253,8 @@ fn inventory_compiler(
          \"mode\":\"ir-inventory\",\"pid\":{pid},\"started_epoch_ms\":{started},\
          \"finished_epoch_ms\":{finished},\"elapsed_seconds\":{elapsed},\
          \"compiler_exit_code\":{code},\"ir_file_count\":{file_count},\
+         \"codegen_units\":16,\"codegen_units_was_implicit\":{codegen_units_was_implicit},\
+         \"incremental\":false,\
          \"bootstrap_scope\":\"none\",\"existing_outputs_preserved\":true}}\n"
     );
     if fs::write(directory.join("invocation.json"), metadata).is_err() {
