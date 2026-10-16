@@ -280,11 +280,7 @@ impl HoaOnboardingFlow {
     }
 
     fn total_dots(&self) -> usize {
-        if self.show_inbox_callout {
-            3
-        } else {
-            2
-        }
+        if self.show_inbox_callout { 3 } else { 2 }
     }
 
     fn selected_session_type(&self) -> SessionType {
