@@ -13,6 +13,7 @@ use ai::api_keys::{ApiKeyManager, AwsCredentialsRefreshStrategy};
 use anyhow::Context;
 pub use driver::AgentDriver;
 use driver::AgentDriverError;
+use driver::agent_setup::configured_skills::{self, merge_skill_dirs};
 pub(crate) use driver::harness::{ClaudeHarness, task_env_vars, validate_cli_installed};
 use telemetry::CliTelemetryEvent;
 use tracing::Instrument as _;
@@ -69,9 +70,7 @@ use crate::ai::cloud_environments::{
     AmbientAgentEnvironment, CloudAmbientAgentEnvironment, SourceRepo,
 };
 use crate::ai::llms::LLMId;
-use crate::ai::skills::{
-    ResolveSkillError, ResolvedSkill, clone_repo_for_skill, resolve_skill_spec,
-};
+use crate::ai::skills::ResolvedSkill;
 use crate::auth::AuthStateProvider;
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::cloud_object::CloudObjectLookup as _;
@@ -272,39 +271,6 @@ fn dispatch_command(
                 return Err(anyhow::anyhow!("invalid value 'runner'"));
             }
             runner::run(ctx, global_options, runner_cmd)
-        }
-    }
-}
-
-fn format_skill_resolution_error(err: ResolveSkillError) -> String {
-    match err {
-        ResolveSkillError::NotFound { skill } => {
-            format!("Skill '{skill}' not found")
-        }
-        ResolveSkillError::RepoNotFound { repo } => {
-            format!("Repository '{repo}' not found")
-        }
-        ResolveSkillError::Ambiguous { skill, candidates } => {
-            let mut msg = format!(
-                "Skill '{skill}' is ambiguous; specify as repo:skill_name\n\nCandidates:\n"
-            );
-            for path in candidates {
-                msg.push_str(&format!("- {}\n", path.display()));
-            }
-            msg
-        }
-        ResolveSkillError::OrgMismatch {
-            repo,
-            expected,
-            found,
-        } => {
-            format!("Repository '{repo}' found but belongs to org '{found}', expected '{expected}'")
-        }
-        ResolveSkillError::ParseFailed { path, message } => {
-            format!("Failed to parse skill file {}: {message}", path.display())
-        }
-        ResolveSkillError::CloneFailed { org, repo, message } => {
-            format!("Failed to clone repository '{org}/{repo}': {message}")
         }
     }
 }
@@ -607,10 +573,22 @@ fn build_server_side_task(
     Ok((config, task))
 }
 
+fn factory_repository_contract(task_id: Option<AmbientAgentTaskId>, enabled: bool) -> bool {
+    task_id.is_some()
+        && enabled
+        && std::env::var_os("WARP_FACTORY_ID").is_some_and(|id| !id.is_empty())
+}
+
+#[derive(Clone, Copy)]
+struct RepositoryContract {
+    supports_deferred_repositories: bool,
+    use_factory_repositories: bool,
+}
+
 fn build_execution_task_and_options(
     args: &RunAgentArgs,
     config: ExecutionConfiguration,
-    use_factory_repositories: bool,
+    repository_contract: RepositoryContract,
     working_dir: PathBuf,
     first_skill: Option<ResolvedSkill>,
     skill_discovery_dirs: Vec<PathBuf>,
@@ -621,12 +599,28 @@ fn build_execution_task_and_options(
     Option<String>,
     crate::ai::cloud_environments::ProvidersConfig,
 )> {
+    let RepositoryContract {
+        supports_deferred_repositories,
+        use_factory_repositories,
+    } = repository_contract;
     let task_id = args
         .task_id
         .as_deref()
         .context("Execution configuration requires a task ID")?
         .parse::<AmbientAgentTaskId>()
         .context("Invalid execution task ID")?;
+    anyhow::ensure!(
+        config.task_id.inner() == task_id.to_string(),
+        "Execution configuration task mismatch"
+    );
+    let execution_id = args
+        .execution_id
+        .as_deref()
+        .context("Execution configuration requires an execution ID")?;
+    anyhow::ensure!(
+        !execution_id.is_empty() && config.execution_id.inner() == execution_id,
+        "Execution configuration execution mismatch"
+    );
     let selected_harness = execution_config::harness(&config.harness)?;
     let model = if selected_harness == Harness::Oz {
         config
@@ -646,8 +640,12 @@ fn build_execution_task_and_options(
         .and_then(|config| config.model_config());
     let mcp_specs = execution_config::mcp_specs(&config.mcp_servers_json)?;
     let repositories = execution_config::repositories(config.repositories)?;
-    let deferred_repositories = if use_factory_repositories {
-        execution_config::deferred_repositories(config.deferred_repositories)?
+    let deferred_repositories = if supports_deferred_repositories {
+        execution_config::repositories(
+            config
+                .deferred_repositories
+                .context("Execution configuration is missing deferred repositories")?,
+        )?
     } else {
         Vec::new()
     };
@@ -658,11 +656,7 @@ fn build_execution_task_and_options(
     }
     let providers = execution_config::providers(config.providers);
     let mut factory_skill_dirs = execution_config::factory_skill_dirs(config.factory_skill_dirs)?;
-    for dir in skill_discovery_dirs {
-        if !factory_skill_dirs.contains(&dir) {
-            factory_skill_dirs.push(dir);
-        }
-    }
+    merge_skill_dirs(&mut factory_skill_dirs, skill_discovery_dirs);
     let task = Task {
         prompt: AgentRunPrompt::ServerSide {
             skill: first_skill.map(|skill| skill.parsed_skill),
@@ -674,7 +668,7 @@ fn build_execution_task_and_options(
         harness: harness_kind(selected_harness, args.harness_transport.unwrap_or_default())?,
     };
     let options = AgentDriverOptions {
-        working_dir,
+        working_dir: working_dir.clone(),
         task_id: Some(task_id),
         use_factory_repositories,
         experimental: None,
@@ -690,6 +684,12 @@ fn build_execution_task_and_options(
                 repositories,
                 deferred_repositories,
                 config.setup_commands,
+            )?;
+            workspace.bind_execution(
+                task_id.to_string(),
+                execution_id.to_owned(),
+                working_dir.clone(),
+                supports_deferred_repositories,
             )?;
             workspace.factory_skill_dirs = Some(factory_skill_dirs);
             workspace
@@ -719,36 +719,6 @@ fn build_execution_task_and_options(
         config.conversation_id.map(|id| id.into_inner()),
         providers,
     ))
-}
-fn selected_execution_skills(
-    skills: Vec<ResolvedSkill>,
-) -> Result<(Option<ResolvedSkill>, Vec<PathBuf>), AgentDriverError> {
-    let mut first = None;
-    let mut discovery_dirs = Vec::new();
-    for skill in skills {
-        let skills_dir = skill
-            .skill_path
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| {
-                AgentDriverError::SkillResolutionFailed(
-                    "Resolved skill has no parent skill directory".to_owned(),
-                )
-            })?
-            .to_path_buf();
-        if skills_dir.to_string_lossy().contains(',') {
-            return Err(AgentDriverError::SkillResolutionFailed(
-                "Resolved skill directory contains a comma".to_owned(),
-            ));
-        }
-        if !discovery_dirs.contains(&skills_dir) {
-            discovery_dirs.push(skills_dir);
-        }
-        if first.is_none() {
-            first = Some(skill);
-        }
-    }
-    Ok((first, discovery_dirs))
 }
 
 fn reconcile_task_harness(
@@ -823,14 +793,12 @@ fn run_task(
     }
 }
 
-/// Singleton model that provides a ModelContext for spawning async operations
-/// when starting the agent driver. This is needed because conversation fetching
-/// requires spawning an async task, which requires a ModelContext.
+/// Provides model context for the async setup that runs before the agent driver is created.
 struct AgentDriverRunner;
 struct ExecutionTaskData {
     server_api: Arc<ServerApi>,
     config: ExecutionConfiguration,
-    use_factory_repositories: bool,
+    repository_contract: RepositoryContract,
     secrets: HashMap<String, ManagedSecretValue>,
     attachments: anyhow::Result<Vec<TaskAttachment>>,
 }
@@ -883,9 +851,10 @@ impl AgentDriverRunner {
             setup_events
                 .post_timeline_event(OzRunTimelineEvent::WorkerContainerReady)
                 .await;
+            let execution_id = args.execution_id.as_deref().filter(|id| !id.is_empty());
             let execution_data = if FeatureFlag::CloudAgentExecutionConfig.is_enabled()
                 && let (Some(task_id), Some(execution_id)) =
-                    (args.task_id.as_deref(), args.execution_id.as_deref())
+                    (args.task_id.as_deref(), execution_id)
             {
                 Some(Self::fetch_execution_task_data(&foreground, task_id, execution_id).await?)
             } else {
@@ -1068,9 +1037,9 @@ impl AgentDriverRunner {
                         output_format,
                         share_requests,
                         task,
-                    );
+                    )
                 })
-                .await?;
+                .await??;
 
             Ok(())
         }
@@ -1139,7 +1108,9 @@ impl AgentDriverRunner {
         task_id: &str,
         execution_id: &str,
     ) -> Result<ExecutionTaskData, AgentDriverError> {
-        let use_factory_repositories = FeatureFlag::FactoryDeferredRepositories.is_enabled();
+        let supports_deferred_repositories = FeatureFlag::FactoryDeferredRepositories.is_enabled();
+        let use_factory_repositories =
+            factory_repository_contract(task_id.parse().ok(), supports_deferred_repositories);
         let (workload_token, no_isolation) =
             match warp_isolation_platform::issue_workload_token(Some(Duration::from_mins(5))).await
             {
@@ -1157,7 +1128,7 @@ impl AgentDriverRunner {
                     task_id,
                     execution_id,
                     workload_token.clone(),
-                    use_factory_repositories,
+                    supports_deferred_repositories,
                 )
             },
             retry::is_transient_graphql_or_http_error,
@@ -1181,7 +1152,10 @@ impl AgentDriverRunner {
         Ok(ExecutionTaskData {
             server_api: api,
             config: data.config,
-            use_factory_repositories,
+            repository_contract: RepositoryContract {
+                supports_deferred_repositories,
+                use_factory_repositories,
+            },
             secrets,
             attachments: data.attachments,
         })
@@ -1355,66 +1329,15 @@ impl AgentDriverRunner {
             return Ok(None);
         };
 
-        // In sandboxed mode with a fully-qualified spec, clone the repo first.
-        let needs_clone = args.sandboxed && skill_spec.org.is_some() && skill_spec.repo.is_some();
-        if needs_clone {
-            let org = skill_spec.org.as_ref().expect("org checked above");
-            let repo_name = skill_spec.repo.as_ref().expect("repo checked above");
-            log::info!("Cloning {org}/{repo_name} for skill resolution in sandboxed mode");
-            setup_events
-                .record_result(SetupStep::SkillRepoClone, async {
-                    clone_repo_for_skill(org, repo_name, working_dir)
-                        .await
-                        .map_err(|err| {
-                            AgentDriverError::SkillResolutionFailed(format_skill_resolution_error(
-                                err,
-                            ))
-                        })
-                })
-                .await?;
-        }
-
-        let working_dir_buf = working_dir.to_path_buf();
-        let skill = foreground
-            .spawn(move |_, ctx| resolve_skill_spec(&skill_spec, &working_dir_buf, ctx))
-            .await?
-            .map_err(|err| {
-                AgentDriverError::SkillResolutionFailed(format_skill_resolution_error(err))
-            })?;
-        log::debug!(
-            "Resolved skill '{}' from {}",
-            skill.name,
-            skill.skill_path.display()
-        );
-        Ok(Some(skill))
-    }
-
-    async fn resolve_execution_skills(
-        foreground: &ModelSpawner<Self>,
-        args: &RunAgentArgs,
-        config: &ExecutionConfiguration,
-        working_dir: &Path,
-        setup_events: &SetupClientEventReporter,
-    ) -> Result<(Option<ResolvedSkill>, Vec<PathBuf>), AgentDriverError> {
-        if !config.skills.is_empty() && !FeatureFlag::OzPlatformSkills.is_enabled() {
-            return Err(AgentDriverError::SkillResolutionFailed(
-                "Skills are not supported in this client build".to_owned(),
-            ));
-        }
-        let mut resolved = Vec::with_capacity(config.skills.len());
-        for entry in &config.skills {
-            let spec: SkillSpec = entry
-                .spec
-                .parse()
-                .map_err(|error: String| AgentDriverError::SkillResolutionFailed(error))?;
-            let mut skill_args = args.clone();
-            skill_args.skill = Some(spec);
-            let skill = Self::resolve_skill(foreground, &skill_args, working_dir, setup_events)
-                .await?
-                .ok_or(AgentDriverError::InvalidRuntimeState)?;
-            resolved.push(skill);
-        }
-        selected_execution_skills(resolved)
+        configured_skills::resolve_skill(
+            foreground,
+            skill_spec,
+            args.sandboxed,
+            working_dir,
+            setup_events,
+        )
+        .await
+        .map(Some)
     }
 
     /// Build the AgentDriverOptions and Task, handling task creation or existing task setup.
@@ -1439,29 +1362,46 @@ impl AgentDriverRunner {
         }
         .map_err(AgentDriverError::ConfigBuildFailed)?;
 
+        let use_factory_repositories = execution_data
+            .as_ref()
+            .map(|data| data.repository_contract.use_factory_repositories)
+            .unwrap_or_else(|| {
+                factory_repository_contract(
+                    args.task_id.as_deref().and_then(|id| id.parse().ok()),
+                    FeatureFlag::FactoryDeferredRepositories.is_enabled(),
+                )
+            });
         if let Some(task_id_str) = args.task_id.as_ref() {
             Self::bootstrap_git_credentials_for_task(
                 foreground,
                 task_id_str,
                 &args,
-                execution_data
-                    .as_ref()
-                    .is_some_and(|data| data.use_factory_repositories),
+                use_factory_repositories,
             )
             .await?;
         }
         if let Some(ExecutionTaskData {
             server_api: execution_server_api,
             config,
-            use_factory_repositories,
+            repository_contract,
             secrets,
             attachments,
         }) = execution_data
         {
-            let (first_skill, skill_discovery_dirs) = Self::resolve_execution_skills(
+            let specs = config
+                .skills
+                .iter()
+                .map(|entry| {
+                    entry
+                        .spec
+                        .parse::<SkillSpec>()
+                        .map_err(AgentDriverError::SkillResolutionFailed)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (first_skill, skill_discovery_dirs) = configured_skills::resolve_configured_skills(
                 foreground,
-                &args,
-                &config,
+                specs,
+                args.sandboxed,
                 &working_dir,
                 setup_events,
             )
@@ -1471,7 +1411,7 @@ impl AgentDriverRunner {
                     build_execution_task_and_options(
                         &args,
                         config,
-                        use_factory_repositories,
+                        repository_contract,
                         working_dir,
                         first_skill,
                         skill_discovery_dirs,
@@ -1549,7 +1489,7 @@ impl AgentDriverRunner {
                 let driver_options = driver::AgentDriverOptions {
                     working_dir: working_dir.clone(),
                     task_id,
-                    use_factory_repositories: false,
+                    use_factory_repositories,
                     experimental: None,
                     parent_run_id: None,
                     should_share,
@@ -1744,7 +1684,10 @@ impl AgentDriverRunner {
         };
         let (regular_result, handoff_result) = futures::join!(regular, handoff);
         let mut attachments_dir = match regular_result {
-            Ok(dir) => dir,
+            Ok(downloads) => {
+                task.harness.set_initial_attachments(downloads.files);
+                downloads.directory
+            }
             Err(error) => {
                 log::warn!("Failed to fetch and download attachments: {error:#}");
                 None
@@ -1854,14 +1797,14 @@ impl AgentDriverRunner {
             handoff_snapshot,
         );
 
-        // Extract attachments_dir from successful result, log errors
-        let mut attachments_dir = match attachments_result {
-            Ok(dir) => dir,
+        let downloads = match attachments_result {
+            Ok(downloads) => downloads,
             Err(e) => {
                 log::warn!("Failed to fetch and download attachments: {e:#}");
-                None
+                driver::attachments::TaskAttachmentDownloads::default()
             }
         };
+        let mut attachments_dir = downloads.directory;
 
         match handoff_snapshot_result {
             Ok(Some(dir)) => {
@@ -1958,6 +1901,7 @@ impl AgentDriverRunner {
                 driver_options.harness_transport,
             )?;
         }
+        task.harness.set_initial_attachments(downloads.files);
 
         driver_options.task_id = parsed_task_id;
         driver_options.parent_run_id = parent_run_id;
@@ -2117,14 +2061,9 @@ impl AgentDriverRunner {
         output_format: OutputFormat,
         share_requests: Option<Vec<ShareRequest>>,
         task: driver::Task,
-    ) {
+    ) -> Result<(), AgentDriverError> {
         maybe_warn_team_api_key(ctx);
-
-        // Initializing the driver will fail if not logged in. Since we check that above, panic here - it's difficult to
-        // fallibly instantiate a UI framework model.
-        let driver = ctx.add_singleton_model(|ctx| {
-            AgentDriver::new(driver_options, ctx).expect("Could not initialize driver")
-        });
+        let driver = AgentDriver::create(driver_options, ctx)?;
 
         driver.update(ctx, |driver, ctx| {
             driver.set_output_format(output_format);
@@ -2146,6 +2085,7 @@ impl AgentDriverRunner {
                 }
             });
         });
+        Ok(())
     }
 }
 
