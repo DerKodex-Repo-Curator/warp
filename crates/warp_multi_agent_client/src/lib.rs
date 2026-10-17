@@ -13,6 +13,7 @@ pub enum Error {
 
     #[error("Failed to resolve ambient headers for multi-agent request")]
     AmbientHeaders(#[source] anyhow::Error),
+
     #[error("Failed to compress multi-agent request")]
     Compression(#[source] std::io::Error),
 
