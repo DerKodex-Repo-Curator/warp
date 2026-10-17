@@ -31,7 +31,7 @@ fn test_apply_v4a_final_bytes() {
         ))
         .unwrap();
         for fixture in fixtures {
-            let hunk: V4AHunk = serde_json::from_value(fixture["corrected"].clone()).unwrap();
+            let hunk: V4AHunk = serde_json::from_value(fixture["dual"].clone()).unwrap();
             let call = ApplyFileDiffs {
                 v4a_updates: vec![apply_file_diffs::V4aFileUpdate {
                     file_path: "fixture.txt".into(),
@@ -41,6 +41,14 @@ fn test_apply_v4a_final_bytes() {
                         old: hunk.old,
                         new: hunk.new,
                         post_context: hunk.post_context,
+                        line_data: hunk.line_data.map(|data| {
+                            apply_file_diffs::v4a_file_update::hunk::LineData {
+                                pre_context: data.pre_context,
+                                old: data.old,
+                                new: data.new,
+                                post_context: data.post_context,
+                            }
+                        }),
                     }],
                     ..Default::default()
                 }],

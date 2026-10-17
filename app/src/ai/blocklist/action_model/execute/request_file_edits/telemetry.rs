@@ -30,15 +30,14 @@ pub enum RequestFileEditsTelemetryEvent {
 pub struct V4AMatchFinishedEvent {
     #[serde(flatten)]
     pub identifiers: AIIdentifiers,
-    pub executor_type: &'static str,
     #[serde(flatten)]
     pub outcomes: V4AMatchOutcomes,
 }
 #[derive(Default, Serialize, Debug)]
 pub struct V4AMatchOutcomes {
-    pub success: usize,
-    pub unmatched: usize,
-    pub noop: usize,
+    pub total_hunks: usize,
+    pub noop_hunks: usize,
+    pub unmatched_hunks: usize,
 }
 
 /// Emitted when a user Accepts or Rejects a code diff suggestsion from Agent Mode.
@@ -256,7 +255,7 @@ impl TelemetryEventDesc for RequestFileEditsTelemetryEventDiscriminants {
             Self::MalformedFinalLineProxy => {
                 "Suggested code diff likely required malformed trailing line correction (heuristic)"
             }
-            Self::V4AMatchFinished => "V4A per-file matching outcomes",
+            Self::V4AMatchFinished => "V4A hunk matching outcomes",
         }
     }
 

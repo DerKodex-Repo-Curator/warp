@@ -134,7 +134,7 @@ fn v4a_string_restore_never_executes_history() {
                 })),
                 ..Default::default()
             }];
-            for (id, old, new) in [("corrected", "\n", ""), ("legacy", "old", "new")] {
+            for (id, old, new) in [("dual", "", ""), ("legacy", "old", "new")] {
                 messages.push(api::Message {
                     id: id.into(),
                     task_id: "root".into(),
@@ -146,9 +146,13 @@ fn v4a_string_restore_never_executes_history() {
                                 v4a_updates: vec![api::message::tool_call::apply_file_diffs::V4aFileUpdate {
                                     file_path: path.to_string_lossy().into_owned(),
                                     hunks: vec![api::message::tool_call::apply_file_diffs::v4a_file_update::Hunk {
-                                        pre_context: "before\n".into(),
+                                        pre_context: "before".into(),
                                         old: old.into(),
                                         new: new.into(),
+                                        line_data: (id == "dual").then(|| api::message::tool_call::apply_file_diffs::v4a_file_update::hunk::LineData {
+                                            pre_context: vec!["before".into()], old: vec!["".into()],
+                                            ..Default::default()
+                                        }),
                                         ..Default::default()
                                     }],
                                     ..Default::default()

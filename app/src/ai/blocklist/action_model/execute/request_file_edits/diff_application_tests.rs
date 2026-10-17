@@ -22,37 +22,30 @@ fn update_deltas(diff: &AIRequestedCodeDiff) -> &[DiffDelta] {
 }
 
 #[test]
-fn v4a_mixed_files_and_match_outcomes() {
+fn v4a_mixed_hunk_match_outcomes() {
     block_on(async {
-        let edits = [
-            ("blank.txt", "before\n\n", "\n", ""),
-            ("ordinary.txt", "before\nold\n", "old\n", "new\n"),
-            ("noop.txt", "before\nsame\n", "same\n", "same\n"),
-            ("unmatched.txt", "before\nKEEP\n", "\n\n", ""),
+        let hunk = |old: &str, new: &str| V4AHunk {
+            change_context: vec![],
+            pre_context: String::new(),
+            old: old.into(),
+            new: new.into(),
+            post_context: String::new(),
+            line_data: None,
+        };
+        let requested = vec![
+            FileEdit::Edit(ParsedDiff::V4AEdit {
+                file: Some("mixed.txt".into()),
+                move_to: None,
+                hunks: vec![hunk("same", "same"), hunk("\n\n", ""), hunk("old", "new")],
+            }),
+            FileEdit::Edit(ParsedDiff::V4AEdit {
+                file: Some("success.txt".into()),
+                move_to: None,
+                hunks: vec![hunk("same", "same"), hunk("old", "new")],
+            }),
         ];
-        let requested = edits
-            .iter()
-            .map(|(file, _, old, new)| {
-                FileEdit::Edit(ParsedDiff::V4AEdit {
-                    file: Some((*file).into()),
-                    move_to: None,
-                    hunks: vec![V4AHunk {
-                        change_context: vec![],
-                        pre_context: "before\n".into(),
-                        old: (*old).into(),
-                        new: (*new).into(),
-                        post_context: String::new(),
-                    }],
-                })
-            })
-            .collect();
-        let result = apply_edits_internal(requested, &SessionContext::new_for_test(), &|path| {
-            let content = edits
-                .iter()
-                .find(|(file, _, _, _)| path.ends_with(file))
-                .unwrap()
-                .1;
-            async move { FileReadResult::Found(content.into()) }
+        let result = apply_edits_internal(requested, &SessionContext::new_for_test(), &|_| async {
+            FileReadResult::Found("same\nold\n".into())
         })
         .await;
         let outcomes = result.v4a_outcomes.unwrap();
@@ -61,32 +54,22 @@ fn v4a_mixed_files_and_match_outcomes() {
                 server_conversation_id: Some("conversation".into()),
                 ..Default::default()
             },
-            executor_type: "warp-app",
             outcomes,
         });
         assert_eq!(
             event.payload(),
             Some(json!({
-                "server_conversation_id": "conversation",
-                "executor_type": "warp-app",
-                "success": 2,
-                "unmatched": 1,
-                "noop": 1,
+                "server_conversation_id": "conversation", "total_hunks": 5,
+                "noop_hunks": 2, "unmatched_hunks": 1,
             }))
         );
-        let blank = result
-            .diffs
-            .iter()
-            .find(|diff| diff.file_name == "blank.txt")
-            .unwrap();
-        assert_eq!(update_deltas(blank)[0].replacement_line_range, 2..3);
-        assert_eq!(update_deltas(blank)[0].insertion, "");
-        let ordinary = result
-            .diffs
-            .iter()
-            .find(|diff| diff.file_name == "ordinary.txt")
-            .unwrap();
-        assert_eq!(update_deltas(ordinary)[0].insertion, "new");
+        assert_eq!(result.errors.len(), 1);
+        for diff in result.diffs {
+            assert_eq!(update_deltas(&diff).len(), 1);
+            assert_eq!(update_deltas(&diff)[0].insertion, "new");
+            assert_eq!(diff.failures.as_ref().unwrap().noop_deltas, 1);
+            assert_eq!(diff.warrants_failure(), diff.file_name == "mixed.txt");
+        }
     });
 }
 
@@ -942,6 +925,7 @@ fn test_apply_v4a_edits_simple_match() {
             file: Some(file_path.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "function foo() {".to_string(),
                 old: "    console.log('hello');".to_string(),
@@ -993,6 +977,7 @@ fn test_apply_v4a_edits_with_jump_context() {
             file: Some(file_path.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec!["class Foo".to_string()],
                 pre_context: "    def bar():".to_string(),
                 old: "        pass".to_string(),
@@ -1038,6 +1023,7 @@ fn test_apply_v4a_edits_no_match() {
             file: Some(file_path.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "Non-existent pre context".to_string(),
                 old: "Non-existent old content".to_string(),
@@ -1087,6 +1073,7 @@ fn test_apply_v4a_edits_noop() {
             file: Some(file_path.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "Line One".to_string(),
                 old: "Line Two".to_string(),
@@ -1142,6 +1129,7 @@ fn test_apply_v4a_edits_multiline_change() {
             file: Some(file_path.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "def calculate():".to_string(),
                 old: "    x = 1\n    y = 2".to_string(),
@@ -1192,6 +1180,7 @@ fn test_apply_v4a_edits_nested_jump_context() {
             file: Some(file_path.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec!["class Outer".to_string(), "class Inner".to_string()],
                 pre_context: "        def method():".to_string(),
                 old: "            pass".to_string(),
@@ -1234,6 +1223,7 @@ fn test_apply_v4a_edits_missing_file() {
             file: Some(non_existent_file.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "pre".to_string(),
                 old: "old content".to_string(),
@@ -1279,6 +1269,7 @@ fn test_apply_v4a_edits_empty_context() {
             file: Some(file_path.clone()),
             move_to: None,
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "".to_string(),
                 old: "second".to_string(),
@@ -1329,6 +1320,7 @@ fn test_apply_v4a_rename_to_nonexistent_file() {
             file: Some(source_path.clone()),
             move_to: Some(target_path.clone()),
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "line one".to_string(),
                 old: "line two".to_string(),
@@ -1392,6 +1384,7 @@ fn test_apply_v4a_rename_to_existing_file() {
             file: Some(source_path.clone()),
             move_to: Some(target_path.clone()),
             hunks: vec![V4AHunk {
+                line_data: None,
                 change_context: vec![],
                 pre_context: "source line one".to_string(),
                 old: "source line two".to_string(),

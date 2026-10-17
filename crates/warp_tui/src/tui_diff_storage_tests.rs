@@ -30,7 +30,7 @@ fn tui_v4a_final_bytes() {
             let path = dir.path().join(fixture["name"].as_str().unwrap());
             let initial = fixture["initial"].as_str().unwrap();
             fs::write(&path, initial).unwrap();
-            let hunk = serde_json::from_value(fixture["corrected"].clone()).unwrap();
+            let hunk = serde_json::from_value(fixture["dual"].clone()).unwrap();
             let diff = ai::diff_validation::fuzzy_match_v4a_diffs(
                 &path.to_string_lossy(),
                 &[hunk],

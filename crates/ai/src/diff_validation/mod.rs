@@ -244,11 +244,27 @@ pub struct V4AHunk {
     pub new: String,
     /// The context lines right after the change.
     pub post_context: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_data: Option<V4ALineData>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct V4ALineData {
+    #[serde(default)]
+    pub pre_context: Vec<String>,
+    #[serde(default)]
+    pub old: Vec<String>,
+    #[serde(default)]
+    pub new: Vec<String>,
+    #[serde(default)]
+    pub post_context: Vec<String>,
 }
 impl V4AHunk {
     /// Constructs terminated original lines for a lossy restored preview.
     pub fn original_content(&self) -> String {
-        let decoded = DecodedV4AHunk::new(self);
+        let Some(decoded) = DecodedV4AHunk::new(self) else {
+            return String::new();
+        };
         decoded
             .pre
             .iter()
@@ -271,20 +287,38 @@ struct DecodedV4AHunk<'a> {
 }
 
 impl<'a> DecodedV4AHunk<'a> {
-    fn new(hunk: &'a V4AHunk) -> Self {
-        Self {
+    fn new(hunk: &'a V4AHunk) -> Option<Self> {
+        if let Some(data) = &hunk.line_data {
+            if [&data.pre_context, &data.old, &data.new, &data.post_context]
+                .into_iter()
+                .flatten()
+                .any(|line| line.contains('\n'))
+            {
+                return None;
+            }
+            return Some(Self {
+                pre: data.pre_context.iter().map(String::as_str).collect(),
+                old: data.old.iter().map(String::as_str).collect(),
+                new: data.new.iter().map(String::as_str).collect(),
+                post: data.post_context.iter().map(String::as_str).collect(),
+            });
+        }
+        Some(Self {
             pre: decode_v4a_lines(&hunk.pre_context),
             old: decode_v4a_lines(&hunk.old),
             new: decode_v4a_lines(&hunk.new),
             post: decode_v4a_lines(&hunk.post_context),
-        }
+        })
     }
 
-    fn insertion(&self, raw: &str) -> String {
-        if raw.contains('\r') {
+    fn insertion(&self, legacy: Option<&str>) -> String {
+        if let Some(raw) = legacy.filter(|raw| raw.contains('\r')) {
             return raw.to_owned();
         }
         let mut insertion = self.new.join("\n");
+        if self.new.iter().any(|line| line.contains('\r')) {
+            return insertion;
+        }
         if self.new.last() == Some(&"") {
             insertion.push('\n');
         }
@@ -373,9 +407,9 @@ fn remove_extra_line_num_prefix(replace: String) -> String {
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct DiffMatchFailures {
     /// Failures to perform a fuzzy match with content.
-    pub fuzzy_match_failures: u8,
+    pub fuzzy_match_failures: usize,
     /// The <search> and <replace> content was identical.
-    pub noop_deltas: u8,
+    pub noop_deltas: usize,
     /// Search blocks that are missing line numbers.
     pub missing_line_numbers: u8,
     /// Identifiers for blocks that failed to fuzzy match. Skipped for telemetry.
@@ -455,7 +489,13 @@ pub fn fuzzy_match_v4a_diffs(
     let file_lines: Vec<&str> = file_content.lines().collect();
 
     for (block_index, diff) in diffs.iter().enumerate() {
-        let decoded = DecodedV4AHunk::new(diff);
+        let Some(decoded) = DecodedV4AHunk::new(diff) else {
+            failures.fuzzy_match_failures += 1;
+            failures.fuzzy_match_failure_details.push(DiffMatchFailure {
+                block_number: block_index + 1,
+            });
+            continue;
+        };
         // Check for no-op diffs
         if decoded.old == decoded.new {
             log::info!("Ignoring V4A diff with identical old and new content.");
@@ -480,7 +520,8 @@ pub fn fuzzy_match_v4a_diffs(
 
                 deltas.push(DiffDelta {
                     replacement_line_range: range.start..range.end,
-                    insertion: decoded.insertion(&diff.new),
+                    insertion: decoded
+                        .insertion(diff.line_data.is_none().then_some(diff.new.as_str())),
                 });
             }
             None => {
@@ -501,10 +542,9 @@ pub fn fuzzy_match_v4a_diffs(
     deltas.sort_by_key(|d| d.replacement_line_range.start);
     deltas = deduplicate_overlapping_deltas(deltas);
 
-    let update_deltas_empty = deltas.is_empty();
     let failures = if failures.fuzzy_match_failures > 0
         || failures.missing_line_numbers > 0
-        || (failures.noop_deltas > 0 && update_deltas_empty)
+        || failures.noop_deltas > 0
     {
         Some(failures)
     } else {

@@ -199,7 +199,6 @@ where
             auth_state,
             RequestFileEditsTelemetryEvent::V4AMatchFinished(V4AMatchFinishedEvent {
                 identifiers: ai_identifiers.clone(),
-                executor_type: warp_core::execution_mode::current_client_id().unwrap_or("unknown"),
                 outcomes,
             }),
             background_executor
@@ -828,7 +827,7 @@ async fn apply_v4a_update<F, Fut>(
 
         // First, match the V4A diffs against the source file (without rename)
         let source_diffs = fuzzy_match_v4a_diffs(&file_path, &deltas, None, file_content.clone());
-        record_v4a_match_outcomes(&source_diffs, result);
+        record_v4a_match_outcomes(&source_diffs, deltas.len(), result);
         if source_diffs.warrants_failure() {
             if let Some(failures) = source_diffs.failures.as_ref() {
                 safe_warn!(
@@ -895,7 +894,7 @@ async fn apply_v4a_update<F, Fut>(
     } else {
         // Normal case: no rename or rename to non-existent file
         let diffs = fuzzy_match_v4a_diffs(&file_path, &deltas, rename_to, file_content);
-        record_v4a_match_outcomes(&diffs, result);
+        record_v4a_match_outcomes(&diffs, deltas.len(), result);
         if diffs.warrants_failure()
             && let Some(failures) = diffs.failures.as_ref()
         {
@@ -916,20 +915,16 @@ async fn apply_v4a_update<F, Fut>(
         result.diffs.push(diffs);
     }
 }
-fn record_v4a_match_outcomes(diffs: &AIRequestedCodeDiff, result: &mut DiffResult) {
+fn record_v4a_match_outcomes(
+    diffs: &AIRequestedCodeDiff,
+    total_hunks: usize,
+    result: &mut DiffResult,
+) {
     let outcomes = result.v4a_outcomes.get_or_insert_with(Default::default);
-    if diffs.warrants_failure() {
-        if diffs
-            .failures
-            .as_ref()
-            .is_some_and(|failures| failures.fuzzy_match_failures > 0)
-        {
-            outcomes.unmatched += 1;
-        } else {
-            outcomes.noop += 1;
-        }
-    } else {
-        outcomes.success += 1;
+    outcomes.total_hunks += total_hunks;
+    if let Some(failures) = &diffs.failures {
+        outcomes.noop_hunks += failures.noop_deltas;
+        outcomes.unmatched_hunks += failures.fuzzy_match_failures;
     }
 }
 

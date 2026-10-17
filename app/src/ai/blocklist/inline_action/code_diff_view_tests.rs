@@ -1,13 +1,21 @@
+use ai::diff_validation::V4ALineData;
+
 use super::*;
 
 #[test]
 fn v4a_string_restore_previews() {
     let hunk = V4AHunk {
+        line_data: Some(V4ALineData {
+            pre_context: vec!["before".into(), "".into()],
+            old: vec!["".into()],
+            new: vec!["replacement".into(), "".into()],
+            post_context: vec!["after".into(), "".into()],
+        }),
         change_context: vec![],
-        pre_context: "before\n\n".into(),
-        old: "\n".into(),
-        new: "replacement\n\n".into(),
-        post_context: "after\n\n".into(),
+        pre_context: "before\n".into(),
+        old: "".into(),
+        new: "replacement\n".into(),
+        post_context: "after\n".into(),
     };
     let edits = vec![FileEdit::Edit(ParsedDiff::V4AEdit {
         file: Some("/tmp/preview.txt".into()),
