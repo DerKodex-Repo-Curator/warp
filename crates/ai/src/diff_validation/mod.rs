@@ -260,17 +260,16 @@ pub struct V4ALineData {
     pub post_context: Vec<String>,
 }
 impl V4AHunk {
-    /// Constructs terminated original lines for a lossy restored preview.
-    pub fn original_content(&self) -> String {
+    /// Returns selected original lines for a restored preview.
+    pub fn original_lines(&self) -> Vec<&str> {
         let Some(decoded) = DecodedV4AHunk::new(self) else {
-            return String::new();
+            return Vec::new();
         };
         decoded
             .pre
-            .iter()
-            .chain(&decoded.old)
-            .chain(&decoded.post)
-            .map(|line| format!("{line}\n"))
+            .into_iter()
+            .chain(decoded.old)
+            .chain(decoded.post)
             .collect()
     }
 }
@@ -316,9 +315,6 @@ impl<'a> DecodedV4AHunk<'a> {
             return raw.to_owned();
         }
         let mut insertion = self.new.join("\n");
-        if self.new.iter().any(|line| line.contains('\r')) {
-            return insertion;
-        }
         if self.new.last() == Some(&"") {
             insertion.push('\n');
         }
@@ -483,10 +479,28 @@ pub fn fuzzy_match_v4a_diffs(
     file_content: impl Into<String>,
 ) -> AIRequestedCodeDiff {
     let file_content = file_content.into();
+    let file_lines: Vec<&str> = file_content.lines().collect();
+    let (deltas, failures) = match_v4a_diffs(diffs, &file_lines);
+
+    AIRequestedCodeDiff {
+        file_name: file_name.into(),
+        diff_type: DiffType::update(deltas, rename_to),
+        failures,
+        original_content: file_content,
+    }
+}
+
+/// Matches synthetic preview lines without normalizing their line endings.
+pub fn fuzzy_match_v4a_preview(diffs: &[V4AHunk], file_lines: &[&str]) -> Vec<DiffDelta> {
+    match_v4a_diffs(diffs, file_lines).0
+}
+
+fn match_v4a_diffs(
+    diffs: &[V4AHunk],
+    file_lines: &[&str],
+) -> (Vec<DiffDelta>, Option<DiffMatchFailures>) {
     let mut deltas = Vec::new();
     let mut failures = DiffMatchFailures::default();
-
-    let file_lines: Vec<&str> = file_content.lines().collect();
 
     for (block_index, diff) in diffs.iter().enumerate() {
         let Some(decoded) = DecodedV4AHunk::new(diff) else {
@@ -504,7 +518,7 @@ pub fn fuzzy_match_v4a_diffs(
         }
 
         // Find the location of the edit using context
-        let match_range = find_v4a_match(&decoded, &diff.change_context, &file_lines);
+        let match_range = find_v4a_match(&decoded, &diff.change_context, file_lines);
 
         match match_range {
             Some(range) => {
@@ -551,12 +565,7 @@ pub fn fuzzy_match_v4a_diffs(
         None
     };
 
-    AIRequestedCodeDiff {
-        file_name: file_name.into(),
-        diff_type: DiffType::update(deltas, rename_to),
-        failures,
-        original_content: file_content,
-    }
+    (deltas, failures)
 }
 
 /// Given a list of `DiffDelta`s sorted by `replacement_line_range.start`,

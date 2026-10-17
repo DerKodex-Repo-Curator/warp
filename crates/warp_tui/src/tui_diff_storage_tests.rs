@@ -64,6 +64,32 @@ async fn accept_local(app: &mut App, diffs: Vec<FileDiff>) -> RequestFileEditsRe
 }
 
 #[test]
+fn tui_v4a_cr_trailing_blank_final_bytes() {
+    App::test((), |mut app| async move {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cr.txt").to_string_lossy().to_string();
+        fs::write(&path, "old\n").unwrap();
+        let hunk = serde_json::from_value(serde_json::json!({
+            "change_context": [], "pre_context": "", "old": "old",
+            "new": "x\ry\n", "post_context": "",
+            "line_data": {"old": ["old"], "new": ["x\ry", ""]}
+        }))
+        .unwrap();
+        let diff = ai::diff_validation::fuzzy_match_v4a_diffs(&path, &[hunk], None, "old\n");
+        assert_eq!(diff.failures, None);
+
+        let result = accept_local(
+            &mut app,
+            vec![FileDiff::new("old\n".into(), path.clone(), diff.diff_type)],
+        )
+        .await;
+
+        assert!(matches!(result, RequestFileEditsResult::Success { .. }));
+        assert_eq!(fs::read(&path).unwrap(), b"x\ry\n\n");
+    });
+}
+
+#[test]
 fn accept_creates_a_new_file() {
     App::test((), |mut app| async move {
         let dir = tempfile::tempdir().unwrap();

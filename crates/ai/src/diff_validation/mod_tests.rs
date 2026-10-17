@@ -81,7 +81,7 @@ fn v4a_line_data_presence_and_validation() {
     let empty = fuzzy_match_v4a_diffs("file", &[hunk.clone()], None, "old\n");
     assert!(deltas(&empty).is_empty());
     assert_eq!(empty.failures.unwrap().noop_deltas, 1);
-    assert_eq!(hunk.original_content(), "");
+    assert!(hunk.original_lines().is_empty());
     for field in ["pre_context", "old", "new", "post_context"] {
         let mut data = serde_json::json!({});
         data[field] = serde_json::json!(["invalid\nline"]);
@@ -89,7 +89,7 @@ fn v4a_line_data_presence_and_validation() {
         let invalid = fuzzy_match_v4a_diffs("file", &[hunk.clone()], None, "old\n");
         assert!(deltas(&invalid).is_empty());
         assert_eq!(invalid.failures.unwrap().fuzzy_match_failures, 1);
-        assert_eq!(hunk.original_content(), "");
+        assert!(hunk.original_lines().is_empty());
     }
     hunk.new = "ignored\r".into();
     hunk.line_data = Some(V4ALineData {
@@ -158,6 +158,18 @@ fn v4a_existing_string_decoding() {
     ] {
         assert_eq!(decode_v4a_lines(wire), expected, "{wire:?}");
     }
+}
+
+#[test]
+fn v4a_legacy_cr_insertion_bytes() {
+    let hunk = serde_json::from_value(serde_json::json!({
+        "change_context": [], "pre_context": "", "old": "old",
+        "new": "x\ry\n", "post_context": ""
+    }))
+    .unwrap();
+    let diff = fuzzy_match_v4a_diffs("file", &[hunk], None, "old\n");
+    assert_eq!(diff.failures, None);
+    assert_eq!(deltas(&diff)[0].insertion, "x\ry\n");
 }
 
 #[test]
