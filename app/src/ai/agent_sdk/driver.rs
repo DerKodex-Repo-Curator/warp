@@ -112,14 +112,14 @@ mod failure_output;
 pub(crate) mod git_credentials;
 pub(crate) mod harness;
 mod harness_output_monitor;
-mod mcp_startup;
+pub(crate) mod mcp_startup;
 pub(super) mod output;
 mod snapshot;
 pub(crate) mod terminal;
 mod termination;
 
 use environment::PrepareEnvironmentError;
-use mcp_startup::MCP_SERVER_STARTUP_TIMEOUT;
+pub(crate) use mcp_startup::MCP_SERVER_STARTUP_TIMEOUT;
 pub(crate) use snapshot::upload_snapshot_for_handoff;
 use terminal::TerminalDriverEvent;
 use termination::{Interrupt, InterruptWatch, RunEndCause};
@@ -2097,12 +2097,14 @@ impl AgentDriver {
                 let managed_mcp_client = foreground
                     .spawn(|_, ctx| ServerApiProvider::as_ref(ctx).get_managed_mcp_client())
                     .await?;
+                let task_id = foreground.spawn(|me, _| me.task_id).await?;
                 let mcp_startup_result = setup_events
                     .record_result(
                         SetupStep::McpServerStartup,
-                        Self::start_task_and_profile_mcp_servers(
+                        mcp_startup::start_task_and_profile_mcp_servers(
                             &task.mcp_specs,
                             managed_mcp_client,
+                            task_id,
                             &foreground,
                         ),
                     )
@@ -2245,12 +2247,14 @@ impl AgentDriver {
                         Ok::<_, AgentDriverError>((harness_exit_rx, runner))
                     })
                     .await?;
-                let runtime_error_patterns = harness.runtime_error_patterns();
+                let runtime_error_patterns = harness.runtime_error_patterns_for_run();
+                let runtime_error_patterns: Vec<&str> =
+                    runtime_error_patterns.iter().map(String::as_str).collect();
 
                 with_credential_refreshes(
                     Self::run_harness(
                         runner,
-                        runtime_error_patterns,
+                        &runtime_error_patterns,
                         &foreground,
                         harness_exit_rx,
                         &setup_events,
@@ -2984,7 +2988,7 @@ impl AgentDriver {
     /// same `AuthenticationRequired` error code used by the auth preflight.
     async fn run_harness(
         runner: Arc<dyn harness::HarnessRunner>,
-        runtime_error_patterns: &'static [&'static str],
+        runtime_error_patterns: &[&str],
         foreground: &ModelSpawner<Self>,
         harness_exit_rx: oneshot::Receiver<()>,
         setup_events: &SetupClientEventReporter,

@@ -190,6 +190,11 @@ enum HostEvent {
         reason: &'static str,
         settling: bool,
     },
+    Cancelled {
+        stream: ResponseStreamId,
+        by: TurnCancellation,
+        settling: bool,
+    },
     MarkedCancelled {
         settling: bool,
     },
@@ -349,6 +354,14 @@ impl TurnHost for RecordingHost {
             settling: self.state.is_settling(),
         });
         Ok(())
+    }
+
+    async fn cancel_turn(&self, stream_id: ResponseStreamId, by: TurnCancellation) {
+        self.record(HostEvent::Cancelled {
+            stream: stream_id,
+            by,
+            settling: self.state.is_settling(),
+        });
     }
 
     async fn mark_conversation_cancelled(&self) {
@@ -512,10 +525,16 @@ fn start_steering() -> (TurnDriver, AcpTurnMapper, Fixture) {
     )
 }
 
-fn finished_count(events: &[HostEvent]) -> usize {
+/// Turns that have ended, whether their stream finished or they were cancelled.
+fn ended_count(events: &[HostEvent]) -> usize {
     events
         .iter()
-        .filter(|event| matches!(event, HostEvent::Finished { .. }))
+        .filter(|event| {
+            matches!(
+                event,
+                HostEvent::Finished { .. } | HostEvent::Cancelled { .. }
+            )
+        })
         .count()
 }
 
@@ -656,7 +675,7 @@ fn a_steer_the_agent_does_not_take_falls_back_to_cancelling_the_turn() {
         fixture.agent.respond(&second, "end_turn").await;
         fixture
             .host
-            .wait_for(|events| finished_count(events) == 2)
+            .wait_for(|events| ended_count(events) == 2)
             .await;
         fixture.unbind()
     };
@@ -686,7 +705,7 @@ fn a_steer_answered_after_the_turn_ended_is_sent_as_a_turn_without_an_interrupti
         fixture.agent.respond(&second, "end_turn").await;
         fixture
             .host
-            .wait_for(|events| finished_count(events) == 2)
+            .wait_for(|events| ended_count(events) == 2)
             .await;
         fixture.unbind()
     };
@@ -735,7 +754,7 @@ fn a_steer_that_started_a_detached_turn_cancels_it_and_sends_the_prompt_as_a_tur
         fixture.agent.respond(&second, "end_turn").await;
         fixture
             .host
-            .wait_for(|events| finished_count(events) == 2)
+            .wait_for(|events| ended_count(events) == 2)
             .await;
         fixture.unbind()
     };
@@ -765,7 +784,7 @@ fn a_steer_the_agent_never_answers_is_sent_as_a_turn_once_the_turn_ends() {
         fixture.agent.respond(&second, "end_turn").await;
         fixture
             .host
-            .wait_for(|events| finished_count(events) == 2)
+            .wait_for(|events| ended_count(events) == 2)
             .await;
         fixture.unbind()
     };
@@ -810,7 +829,7 @@ fn an_agent_that_rejects_the_steering_method_is_not_steered_again() {
         fixture.agent.respond(&third, "end_turn").await;
         fixture
             .host
-            .wait_for(|events| finished_count(events) == 3)
+            .wait_for(|events| ended_count(events) == 3)
             .await;
         fixture.unbind()
     };
@@ -866,27 +885,41 @@ fn a_follow_up_mid_turn_cancels_the_turn_then_prompts_with_an_interruption_note(
         "the echo shows the user's text only"
     );
     let events = host.events();
-    let first_finished = events
+    let first_cancelled = events
         .iter()
-        .position(|event| matches!(event, HostEvent::Finished { stream, .. } if stream == first))
+        .position(|event| matches!(event, HostEvent::Cancelled { stream, .. } if stream == first))
         .unwrap();
     let second_began = events
         .iter()
         .position(|event| matches!(event, HostEvent::BeginTurn { stream, .. } if stream == second))
         .unwrap();
-    assert!(first_finished < second_began);
+    assert!(first_cancelled < second_began);
     assert_eq!(
-        events[first_finished],
-        HostEvent::Finished {
+        events[first_cancelled],
+        HostEvent::Cancelled {
             stream: first.clone(),
-            reason: "done",
+            by: TurnCancellation::FollowUp,
             settling: true,
         },
         "the cancelled turn settles while the driver's idle exit is held off"
     );
-    assert_eq!(
-        events[first_finished + 1],
-        HostEvent::MarkedCancelled { settling: true }
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            HostEvent::Finished { stream, .. } if stream == first
+        )),
+        "the steered turn ends through the cancellation, not as a completed stream: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            HostEvent::MarkedCancelled { .. }
+                | HostEvent::Cancelled {
+                    by: TurnCancellation::Interrupt,
+                    ..
+                }
+        )),
+        "a steer never surfaces a cancelled conversation status: {events:?}"
     );
     assert_eq!(
         events[second_began],
@@ -963,7 +996,9 @@ fn a_follow_up_between_turns_is_sent_without_a_cancel() {
     assert!(
         !host.events().iter().any(|event| matches!(
             event,
-            HostEvent::ShowQueued(_) | HostEvent::MarkedCancelled { .. }
+            HostEvent::ShowQueued(_)
+                | HostEvent::Cancelled { .. }
+                | HostEvent::MarkedCancelled { .. }
         )),
         "{:?}",
         host.events()
@@ -997,13 +1032,7 @@ fn follow_ups_that_arrive_during_one_cancel_go_out_together_in_order() {
         fixture.agent.respond(&second, "end_turn").await;
         fixture
             .host
-            .wait_for(|events| {
-                events
-                    .iter()
-                    .filter(|event| matches!(event, HostEvent::Finished { .. }))
-                    .count()
-                    == 2
-            })
+            .wait_for(|events| matches!(events.last(), Some(HostEvent::Finished { .. })))
             .await;
         (author_a, fixture.unbind())
     };
@@ -1011,6 +1040,15 @@ fn follow_ups_that_arrive_during_one_cancel_go_out_together_in_order() {
 
     let streams = host.streams();
     assert_eq!(streams.len(), 2);
+    assert!(
+        host.events().contains(&HostEvent::Cancelled {
+            stream: streams[0].clone(),
+            by: TurnCancellation::FollowUp,
+            settling: true,
+        }),
+        "{:?}",
+        host.events()
+    );
     assert_eq!(
         host.texts_on(&streams[1]),
         vec!["a", "b"],
@@ -1102,17 +1140,12 @@ fn a_pending_permission_request_is_answered_cancelled_when_a_follow_up_steers() 
         fixture.agent.respond(&second, "end_turn").await;
         fixture
             .host
-            .wait_for(|events| {
-                events
-                    .iter()
-                    .filter(|event| matches!(event, HostEvent::Finished { .. }))
-                    .count()
-                    == 2
-            })
+            .wait_for(|events| matches!(events.last(), Some(HostEvent::Finished { .. })))
             .await;
         fixture.unbind()
     };
-    let ((_, _), ()) = block_on(join(script, driver.run(&mut mapper)));
+    let ((host, _), ()) = block_on(join(script, driver.run(&mut mapper)));
+    assert_eq!(host.streams().len(), 2, "{:?}", host.events());
 }
 
 #[test]
@@ -1125,7 +1158,7 @@ fn an_interrupt_mid_turn_cancels_the_turn_and_marks_the_conversation_cancelled()
         fixture.agent.respond(&first, "cancelled").await;
         fixture
             .host
-            .wait_for(|events| matches!(events.last(), Some(HostEvent::MarkedCancelled { .. })))
+            .wait_for(|events| matches!(events.last(), Some(HostEvent::Cancelled { .. })))
             .await;
         fixture.unbind()
     };
@@ -1134,16 +1167,15 @@ fn an_interrupt_mid_turn_cancels_the_turn_and_marks_the_conversation_cancelled()
     let events = host.events();
     let stream = host.streams()[0].clone();
     assert_eq!(
-        &events[events.len() - 3..],
+        &events[events.len() - 2..],
         &[
-            HostEvent::Finished {
-                stream,
-                reason: "done",
-                settling: true,
-            },
             // No follow-up is coming: the `Cancelled` status is the run settling, and the
             // driver's idle exit must act on it.
-            HostEvent::MarkedCancelled { settling: false },
+            HostEvent::Cancelled {
+                stream,
+                by: TurnCancellation::Interrupt,
+                settling: false,
+            },
             HostEvent::Stopped,
         ],
         "{events:?}"
@@ -1169,16 +1201,28 @@ fn an_agent_error_while_a_cancel_is_pending_counts_as_the_cancellation() {
             .await;
         fixture
             .host
-            .wait_for(|events| matches!(events.last(), Some(HostEvent::MarkedCancelled { .. })))
+            .wait_for(|events| matches!(events.last(), Some(HostEvent::Cancelled { .. })))
             .await;
         fixture.unbind()
     };
     let ((host, _), ()) = block_on(join(script, driver.run(&mut mapper)));
 
     assert!(
+        host.events().iter().any(|event| matches!(
+            event,
+            HostEvent::Cancelled {
+                by: TurnCancellation::Interrupt,
+                ..
+            }
+        )),
+        "{:?}",
         host.events()
+    );
+    assert!(
+        !host
+            .events()
             .iter()
-            .any(|event| matches!(event, HostEvent::Finished { reason: "done", .. })),
+            .any(|event| matches!(event, HostEvent::Finished { .. })),
         "{:?}",
         host.events()
     );

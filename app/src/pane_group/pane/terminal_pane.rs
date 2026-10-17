@@ -348,10 +348,9 @@ impl PaneContent for TerminalPane {
             } = event
                 && display_mode.is_fullscreen()
             {
-                group.restore_missing_child_agent_panes_for_parent(
+                group.restore_child_agents_for_parent(
                     *conversation_id,
                     terminal_pane_id.into(),
-                    true,
                     ctx,
                 );
             }
@@ -1381,16 +1380,6 @@ fn handle_terminal_view_event(
                         ctx,
                     );
                 }
-            }
-            Event::EnsureUnifiedViewerChildPane {
-                conversation_id,
-                task,
-            } => {
-                group.materialize_viewer_child_pane_from_task(
-                    *conversation_id,
-                    task.as_ref().clone(),
-                    ctx,
-                );
             }
             Event::OrchestrationChildSharedSessionJoinFailed {
                 conversation_id,
