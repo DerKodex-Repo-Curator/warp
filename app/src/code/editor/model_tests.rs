@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use futures::channel::oneshot;
+use line_ending::LineEnding;
 use vec1::vec1;
 use warp_editor::content::buffer::{InitialBufferState, SelectionOffsets};
 use warp_editor::multiline::MultilineString;
@@ -66,6 +67,12 @@ fn test_apply_v4a_final_bytes() {
                 panic!("expected update");
             };
             let editor = mock_model(&mut app, initial, ContentVersion::new());
+            // LF fixtures must not inherit the platform default for empty buffers.
+            editor.update(&mut app, |editor, ctx| {
+                editor.buffer().update(ctx, |buffer, _| {
+                    buffer.set_line_ending_mode(LineEnding::LF);
+                });
+            });
             layout_model(&mut app, &editor).await;
             editor.update(&mut app, |editor, ctx| editor.apply_diffs(deltas, ctx));
             editor.read(&app, |editor, ctx| {
