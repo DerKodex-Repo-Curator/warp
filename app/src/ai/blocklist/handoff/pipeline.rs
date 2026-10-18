@@ -1008,6 +1008,7 @@ fn build_spawn_request(
         conversation_id: forked_conversation_id,
         initial_snapshot_token,
         agent_identity_uid: None,
+        blueprint_stage_path: None,
         snapshot_disabled: snapshot_disabled.then_some(true),
         orchestration_handoff,
     }

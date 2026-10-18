@@ -82,6 +82,7 @@ fn config(harness_type: &str) -> RemoteChildLaunchConfig {
         auth_secret_name: None,
         runner_id: String::new(),
         agent_identity_uid: None,
+        blueprint_stage_path: None,
     }
 }
 
@@ -117,6 +118,7 @@ fn prepared_remote_request_matches_gui_wire_semantics() {
                 auth_secret_name: None,
                 runner_id: String::new(),
                 agent_identity_uid: None,
+                blueprint_stage_path: None,
             },
             lifecycle_subscription: None,
             parent_conversation_id: crate::ai::agent::conversation::AIConversationId::new(),
@@ -138,6 +140,7 @@ fn prepared_remote_request_matches_gui_wire_semantics() {
                     auth_secret_name: None,
                     runner_id: "runner-1".to_string(),
                     agent_identity_uid: Some("researcher-agent".to_string()),
+                    blueprint_stage_path: Some("/work/research".to_string()),
                 },
                 request_team_scope(),
                 ctx,
@@ -160,6 +163,7 @@ fn prepared_remote_request_matches_gui_wire_semantics() {
             assert_eq!(prepared.spawn_request.team, Some(true));
             let wire = serde_json::to_value(&prepared.spawn_request).unwrap();
             assert_eq!(wire["metadata"]["ticket_id"], "ENG-42");
+            assert_eq!(wire["blueprint_stage_path"], "/work/research");
             let config = prepared.spawn_request.config.unwrap();
             assert_eq!(config.environment_id.as_deref(), Some("env-1"));
             assert_eq!(config.runner_id.as_deref(), Some("runner-1"));
@@ -225,6 +229,7 @@ fn repo_qualified_skill_spec_resolves_into_runtime_skills() {
                 auth_secret_name: None,
                 runner_id: String::new(),
                 agent_identity_uid: None,
+                blueprint_stage_path: None,
             },
             lifecycle_subscription: None,
             parent_conversation_id: crate::ai::agent::conversation::AIConversationId::new(),
@@ -246,6 +251,7 @@ fn repo_qualified_skill_spec_resolves_into_runtime_skills() {
                     auth_secret_name: None,
                     runner_id: String::new(),
                     agent_identity_uid: None,
+                    blueprint_stage_path: None,
                 },
                 request_team_scope(),
                 ctx,
@@ -278,6 +284,7 @@ fn missing_repo_qualified_skill_reports_repository_and_reason() {
                 auth_secret_name: None,
                 runner_id: String::new(),
                 agent_identity_uid: None,
+                blueprint_stage_path: None,
             },
             lifecycle_subscription: None,
             parent_conversation_id: crate::ai::agent::conversation::AIConversationId::new(),

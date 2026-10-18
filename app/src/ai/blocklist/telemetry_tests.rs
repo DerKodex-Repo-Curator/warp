@@ -24,6 +24,7 @@ fn request() -> RunAgentsRequest {
                 prompt: String::new(),
                 title: String::new(),
                 agent_identity_uid: String::new(),
+                blueprint_stage_path: String::new(),
                 model_id: String::new(),
             })
             .collect(),

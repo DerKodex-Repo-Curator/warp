@@ -24041,6 +24041,7 @@ impl TerminalView {
                     prompt: "Do the work.".to_owned(),
                     title: String::new(),
                     agent_identity_uid: String::new(),
+                    blueprint_stage_path: String::new(),
                     model_id: String::new(),
                 })
                 .collect(),

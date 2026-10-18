@@ -57,6 +57,7 @@ fn make_request_with_skills(
             prompt: "do work".to_string(),
             title: "Child agent".to_string(),
             agent_identity_uid: String::new(),
+            blueprint_stage_path: String::new(),
             model_id: String::new(),
         }],
         plan_id: String::new(),

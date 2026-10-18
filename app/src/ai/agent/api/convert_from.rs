@@ -146,6 +146,7 @@ fn convert_run_agents(
                 prompt: config.prompt,
                 title: config.title,
                 agent_identity_uid: config.agent_identity_uid,
+                blueprint_stage_path: config.blueprint_stage_path,
                 model_id: config.model_id,
             })
             .collect(),

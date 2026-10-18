@@ -131,6 +131,7 @@ fn remote_request(parent_conversation_id: AIConversationId) -> StartAgentRequest
             auth_secret_name: None,
             runner_id: String::new(),
             agent_identity_uid: None,
+            blueprint_stage_path: None,
         },
         lifecycle_subscription: None,
         parent_conversation_id,

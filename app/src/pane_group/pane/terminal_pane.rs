@@ -1611,6 +1611,7 @@ fn dispatch_start_agent_conversation(
             auth_secret_name,
             runner_id,
             agent_identity_uid,
+            blueprint_stage_path,
         } => {
             let request_team_scope = request.request_team_scope;
             let working_dir = group
@@ -1634,6 +1635,7 @@ fn dispatch_start_agent_conversation(
                     auth_secret_name,
                     runner_id,
                     agent_identity_uid,
+                    blueprint_stage_path,
                 },
                 request_team_scope,
                 ctx,

@@ -579,6 +579,7 @@ impl AmbientAgentRunner {
                     HeadlessTeamScope::Team(_) => true,
                 }),
                 agent_identity_uid: args.agent_uid,
+                blueprint_stage_path: None,
                 skill,
                 attachments,
                 interactive: None,

@@ -3858,6 +3858,7 @@ fn cloud_mode_dispatched_agent_inserts_queued_user_query() {
                             title: None,
                             team: Some(false),
                             agent_identity_uid: None,
+                            blueprint_stage_path: None,
                             skill: None,
                             attachments: vec![],
                             interactive: None,

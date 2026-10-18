@@ -763,6 +763,11 @@ pub fn run_agents_to_start_agent_mode(
     run_auth_secret_name: Option<&str>,
     cfg: &RunAgentsAgentRunConfig,
 ) -> Result<StartAgentExecutionMode, String> {
+    if !cfg.blueprint_stage_path.is_empty()
+        && (!run_execution_mode.is_remote() || cfg.agent_identity_uid.trim().is_empty())
+    {
+        return Err("blueprint_stage_path requires a named remote profile.".to_string());
+    }
     match run_execution_mode {
         RunAgentsExecutionMode::Local => {
             // Named-agent identity requires the public-API dispatch path, which
@@ -831,6 +836,8 @@ pub fn run_agents_to_start_agent_mode(
                 runner_id: runner_id.clone(),
                 agent_identity_uid: Some(cfg.agent_identity_uid.clone())
                     .filter(|s| !s.trim().is_empty()),
+                blueprint_stage_path: Some(cfg.blueprint_stage_path.clone())
+                    .filter(|path| !path.is_empty()),
             })
         }
     }

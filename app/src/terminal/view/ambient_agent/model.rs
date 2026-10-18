@@ -1158,6 +1158,7 @@ impl AmbientAgentViewModel {
             title: None,
             team: Some(scope.team_uid().is_some()),
             agent_identity_uid: None,
+            blueprint_stage_path: None,
             skill: None,
             attachments,
             interactive: None,

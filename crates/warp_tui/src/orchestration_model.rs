@@ -544,6 +544,7 @@ impl TuiOrchestrationModel {
                 auth_secret_name,
                 runner_id,
                 agent_identity_uid,
+                blueprint_stage_path,
             } => {
                 let team_scope = request.request_team_scope;
                 self.register_event_consumer(
@@ -566,6 +567,7 @@ impl TuiOrchestrationModel {
                         auth_secret_name,
                         runner_id,
                         agent_identity_uid,
+                        blueprint_stage_path,
                     },
                     team_scope,
                     ctx,

@@ -148,7 +148,7 @@ fn extract_file_artifact_created(
 }
 
 #[test]
-fn converts_run_agents_metadata_maps() {
+fn converts_run_agents_metadata_and_stage_selection() {
     let task_id = TaskId::new("task-id".to_string());
     let metadata = HashMap::from([("ticket_id".to_string(), "ENG-42".to_string())]);
     let child_metadata = HashMap::from([("stage".to_string(), String::new())]);
@@ -160,6 +160,7 @@ fn converts_run_agents_metadata_maps() {
                 agent_run_configs: vec![api::run_agents::AgentRunConfig {
                     name: "child".to_string(),
                     metadata: child_metadata.clone(),
+                    blueprint_stage_path: "/work/review".to_string(),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -186,6 +187,10 @@ fn converts_run_agents_metadata_maps() {
     };
     assert_eq!(request.metadata, metadata);
     assert_eq!(request.agent_run_configs[0].metadata, child_metadata);
+    assert_eq!(
+        request.agent_run_configs[0].blueprint_stage_path,
+        "/work/review"
+    );
 }
 
 #[test]

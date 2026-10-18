@@ -50,6 +50,7 @@ pub struct RemoteChildLaunchConfig {
     pub auth_secret_name: Option<String>,
     pub runner_id: String,
     pub agent_identity_uid: Option<String>,
+    pub blueprint_stage_path: Option<String>,
 }
 
 impl RemoteChildLaunchConfig {
@@ -244,6 +245,7 @@ pub fn prepare_remote_child_launch(
         auth_secret_name,
         runner_id,
         agent_identity_uid,
+        blueprint_stage_path,
     } = config;
     let Some(parent_run_id) = request.parent_run_id.clone() else {
         return Err(PrepareRemoteChildLaunchError::MissingParentRunId);
@@ -320,6 +322,7 @@ pub fn prepare_remote_child_launch(
         conversation_id: None,
         initial_snapshot_token: None,
         agent_identity_uid: agent_identity_uid.filter(|uid| !uid.trim().is_empty()),
+        blueprint_stage_path,
         snapshot_disabled: should_disable_snapshot(ctx).then_some(true),
         orchestration_handoff: None,
     };

@@ -948,6 +948,7 @@ fn handoff_request_for_test() -> SpawnAgentRequest {
         title: None,
         team: Some(false),
         agent_identity_uid: None,
+        blueprint_stage_path: None,
         skill: None,
         attachments: Vec::new(),
         interactive: Some(true),

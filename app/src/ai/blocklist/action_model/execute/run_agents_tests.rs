@@ -385,6 +385,7 @@ fn remote_run_agents_action(harness_type: &str) -> AIAgentAction {
                 prompt: "Help".to_string(),
                 title: String::new(),
                 agent_identity_uid: String::new(),
+                blueprint_stage_path: String::new(),
                 model_id: String::new(),
             }],
             plan_id: String::new(),
@@ -410,6 +411,7 @@ fn local_codex_run_agents_maps_to_local_harness_mode_when_flag_enabled() {
         prompt: "Investigate the failure".to_string(),
         title: String::new(),
         agent_identity_uid: String::new(),
+        blueprint_stage_path: String::new(),
         model_id: String::new(),
     };
 
@@ -429,6 +431,35 @@ fn local_codex_run_agents_maps_to_local_harness_mode_when_flag_enabled() {
             harness_type: Some("codex".to_string()),
             model_id: None,
         }
+    );
+}
+
+#[test]
+fn blueprint_stage_requires_named_remote_dispatch() {
+    let action = remote_run_agents_action("oz");
+    let AIAgentActionType::RunAgents(request) = action.action else {
+        panic!("expected run_agents");
+    };
+    let mut cfg = request.agent_run_configs[0].clone();
+    cfg.blueprint_stage_path = "/work/review".to_string();
+    assert!(
+        run_agents_to_start_agent_mode(&request.execution_mode, "oz", "", &[], None, &cfg,)
+            .is_err()
+    );
+    cfg.agent_identity_uid = "reviewer".to_string();
+    let mode =
+        run_agents_to_start_agent_mode(&request.execution_mode, "oz", "", &[], None, &cfg).unwrap();
+    let StartAgentExecutionMode::Remote {
+        blueprint_stage_path,
+        ..
+    } = mode
+    else {
+        panic!("expected remote dispatch");
+    };
+    assert_eq!(blueprint_stage_path.as_deref(), Some("/work/review"));
+    assert!(
+        run_agents_to_start_agent_mode(&RunAgentsExecutionMode::Local, "oz", "", &[], None, &cfg,)
+            .is_err()
     );
 }
 

@@ -428,6 +428,7 @@ fn agent_cfg() -> RunAgentsAgentRunConfig {
         prompt: "do X".to_string(),
         title: "Child".to_string(),
         agent_identity_uid: String::new(),
+        blueprint_stage_path: String::new(),
         model_id: String::new(),
     }
 }
@@ -465,6 +466,7 @@ fn remote_arm_propagates_skills_into_skill_references() {
         auth_secret_name,
         runner_id: _,
         agent_identity_uid,
+        blueprint_stage_path: _,
     } = mode
     else {
         panic!("expected Remote start-agent mode");
